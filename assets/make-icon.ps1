@@ -1,5 +1,5 @@
 ﻿# 生成 assets/icon.ico：iOS 风格蓝色圆角底 + “A / 文”两个对话气泡，表达翻译。
-# 托盘等小尺寸放不下两个气泡，改用单气泡的简化版。图标有改动时手动运行一次，结果提交到仓库。
+# 所有尺寸用同一设计，托盘和窗口里的图标保持一致。图标有改动时手动运行一次，结果提交到仓库。
 param([string]$PreviewDir)
 Add-Type -AssemblyName System.Drawing
 
@@ -68,16 +68,11 @@ function New-Frame([int]$size) {
 
     $white = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
     $blue = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 0, 100, 240))
-    if ($size -le 24) {
-        $g.FillPath($white, (New-Bubble ($big * 0.14) ($big * 0.15) ($big * 0.72) ($big * 0.58) ($big * 0.16) $true))
-        Add-Glyph $g '文' 'Microsoft YaHei' ($big * 0.52) ($big * 0.50) ($big * 0.44) $blue
-    } else {
-        $soft = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(115, 255, 255, 255))
-        $g.FillPath($soft, (New-Bubble ($big * 0.11) ($big * 0.13) ($big * 0.50) ($big * 0.42) ($big * 0.11) $true))
-        Add-Glyph $g 'A' 'Segoe UI' ($big * 0.33) ($big * 0.36) ($big * 0.335) $white
-        $g.FillPath($white, (New-Bubble ($big * 0.37) ($big * 0.38) ($big * 0.52) ($big * 0.42) ($big * 0.11) $false))
-        Add-Glyph $g '文' 'Microsoft YaHei' ($big * 0.33) ($big * 0.63) ($big * 0.59) $blue
-    }
+    $soft = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(115, 255, 255, 255))
+    $g.FillPath($soft, (New-Bubble ($big * 0.11) ($big * 0.13) ($big * 0.50) ($big * 0.42) ($big * 0.11) $true))
+    Add-Glyph $g 'A' 'Segoe UI' ($big * 0.33) ($big * 0.36) ($big * 0.335) $white
+    $g.FillPath($white, (New-Bubble ($big * 0.37) ($big * 0.38) ($big * 0.52) ($big * 0.42) ($big * 0.11) $false))
+    Add-Glyph $g '文' 'Microsoft YaHei' ($big * 0.33) ($big * 0.63) ($big * 0.59) $blue
     $g.Dispose()
 
     $frame = New-Object System.Drawing.Bitmap $size, $size

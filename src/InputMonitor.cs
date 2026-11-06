@@ -39,7 +39,7 @@ namespace DoubleCtrl
             thread.Start();
         }
 
-        // 取词时自己注入的按键不能再被当作用户操作。
+        // 取词时自己模拟的按键不能再被当作用户操作。
         public void SuppressInjected(int ms)
         {
             Volatile.Write(ref _suppressUntil, Environment.TickCount + ms);

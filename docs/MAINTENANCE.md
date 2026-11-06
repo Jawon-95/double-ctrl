@@ -28,6 +28,7 @@ Double Ctrl 依赖一批不受我们控制的东西：有道的非公开接口�
 | 剪贴板内容被改 | 日志 `tier=clipboard`、`late copy` | [剪贴板](#剪贴板) |
 | Win+V 多出条目 | 日志 `history` | [Win+V 历史](#win-v-历史) |
 | 没有声音 | 日志 `voice:`、`mci error` | [发音](#发音) |
+| 界面异常或功能突然失灵 | `%APPDATA%\DoubleCtrl\crash.log` | 按里面的异常堆栈定位，它不需要 `--debug` |
 
 ## 接口失效
 
@@ -162,7 +163,11 @@ curl -s "https://dict.youdao.com/jsonapi_s?doctype=json&jsonversion=4" --data "q
   定位必须用 `ActualHeight`，否则内容变高后窗口会超出屏幕。
 - **菜单**：`IosMenu` 的阴影空间要由外层容器提供，`Popup` 定位时不计入直接子元素的 `Margin`。
   菜单的关闭靠 `PopupController.OnGlobalMouseDown`，因为托盘菜单打开时程序不在前台。
-- **主题**：颜色都在 `src/Theme.cs`，界面用 `DynamicResource` / `SetResourceReference` 引用，不要写死颜色。
+- **主题**：颜色都在 `src/Theme.cs`，不要写死颜色。切换时用定时器逐帧计算颜色，同时更新两份画刷：
+  窗口每帧换一组冻结画刷到资源里；菜单用 `Theme.Get` 拿可变画刷，因为 `Popup` 不在窗口元素树里，收不到资源变更。
+  **不要对资源里的画刷用 `BeginAnimation`**：模板和触发器用过后 WPF 会冻结它们，第二次切换主题时程序会直接崩溃。
+- **窗口动画**：`Hide` 只是开始收缩，动画结束才真正隐藏，`_closing` 表示收缩中。收缩途中再次弹出时
+  `Reveal` 清掉 `_closing`，结束回调就不会把窗口藏起来。判断窗口是否可见时要同时看 `_closing`。
   跟随系统读的是注册表 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize` 的 `AppsUseLightTheme`，
   系统切换时靠 `SystemEvents.UserPreferenceChanged` 触发。微软改了这个键的话，跟随系统会失效，手动切换不受影响。
 - **图标字体**：按钮图标用 `Segoe MDL2 Assets`，Windows 10 起自带。

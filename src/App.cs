@@ -11,8 +11,8 @@ using Application = System.Windows.Application;
 
 [assembly: AssemblyTitle("Double Ctrl")]
 [assembly: AssemblyProduct("Double Ctrl")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 namespace DoubleCtrl
 {
@@ -65,6 +65,14 @@ namespace DoubleCtrl
 
         private void Run(bool autostart)
         {
+            // 常驻后台的工具不该因为一处界面异常就整个退出，记下来继续运行。
+            _app.DispatcherUnhandledException += (sender, e) =>
+            {
+                Log.Crash(e.Exception);
+                e.Handled = true;
+            };
+            AppDomain.CurrentDomain.UnhandledException += (sender, e) => Log.Crash(e.ExceptionObject);
+
             AutoStart.Refresh();
             SelectionReader.WarmUp();
             DictClient.WarmUp();

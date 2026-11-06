@@ -12,6 +12,7 @@ namespace DoubleCtrl
         public static readonly string Data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DoubleCtrl");
         public static readonly string Config = Path.Combine(Data, "config.json");
         public static readonly string DebugLog = Path.Combine(Data, "debug.log");
+        public static readonly string CrashLog = Path.Combine(Data, "crash.log");
     }
 
     internal sealed class Settings
@@ -89,6 +90,20 @@ namespace DoubleCtrl
     {
         public static bool Enabled;
         private static readonly object Gate = new object();
+
+        // 不受 --debug 控制：用户遇到问题时才有东西可查。只记录异常，不含选中的文字。
+        public static void Crash(object error)
+        {
+            try
+            {
+                lock (Gate)
+                {
+                    Directory.CreateDirectory(Paths.Data);
+                    File.AppendAllText(Paths.CrashLog, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + error + Environment.NewLine + Environment.NewLine, Encoding.UTF8);
+                }
+            }
+            catch (IOException) { }
+        }
 
         public static void Write(string message)
         {

@@ -21,6 +21,7 @@ namespace DoubleCtrl
         private const double Radius = 10;
         private const double FontSize = 12;
         private const double SwitchTravel = 12;
+        private const double SegmentWidth = 34;
         private static readonly FontFamily UiFont = new FontFamily("Microsoft YaHei UI, Segoe UI");
         private static readonly Brush SwitchOn = Frozen(Color.FromRgb(0x34, 0xC7, 0x59));
 
@@ -45,8 +46,8 @@ namespace DoubleCtrl
                 Effect = new DropShadowEffect { BlurRadius = 18, ShadowDepth = 4, Opacity = 0.3 },
                 RenderTransform = new ScaleTransform(1, 1),
             };
-            _panel.SetResourceReference(Border.BackgroundProperty, "MenuPanel");
-            _panel.SetResourceReference(Border.BorderBrushProperty, "MenuEdge");
+            Paint(_panel, Border.BackgroundProperty, "MenuPanel");
+            Paint(_panel, Border.BorderBrushProperty, "MenuEdge");
             TextOptions.SetTextFormattingMode(_panel, TextFormattingMode.Display);
             // 面板外再包一层：Popup 定位时不计入直接子元素的 Margin，阴影空间要由容器提供。
             _popup = new Popup { AllowsTransparency = true, StaysOpen = true, Child = new Grid { Children = { _panel } } };
@@ -80,7 +81,7 @@ namespace DoubleCtrl
                     FontWeight = FontWeights.Bold,
                     VerticalAlignment = VerticalAlignment.Center,
                 };
-                mark.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+                Paint(mark, TextBlock.ForegroundProperty, "Accent");
             }
             AddRow(text, "Text", mark, delegate
             {
@@ -93,7 +94,7 @@ namespace DoubleCtrl
         public void AddSwitch(string text, bool isOn, Action onToggle)
         {
             var off = new Border { CornerRadius = new CornerRadius(9) };
-            off.SetResourceReference(Border.BackgroundProperty, "SwitchOff");
+            Paint(off, Border.BackgroundProperty, "SwitchOff");
             var on = new Border { CornerRadius = new CornerRadius(9), Background = SwitchOn, Opacity = isOn ? 1 : 0 };
             var slide = new TranslateTransform(isOn ? SwitchTravel : 0, 0);
             var knob = new Ellipse
@@ -124,34 +125,29 @@ namespace DoubleCtrl
         public void AddSegments(string text, KeyValuePair<string, string>[] options, string selected, Action<string> onSelect)
         {
             var back = new Border { CornerRadius = new CornerRadius(6), Padding = new Thickness(2), VerticalAlignment = VerticalAlignment.Center };
-            back.SetResourceReference(Border.BackgroundProperty, "SegmentBack");
+            Paint(back, Border.BackgroundProperty, "SegmentBack");
             var strip = new StackPanel { Orientation = Orientation.Horizontal };
-            back.Child = strip;
+            int selectedIndex = options.ToList().FindIndex(o => o.Key == selected);
+            var slide = new TranslateTransform(selectedIndex * SegmentWidth, 0);
+            var thumb = new Border { Width = SegmentWidth, Height = 18, CornerRadius = new CornerRadius(4), HorizontalAlignment = HorizontalAlignment.Left, RenderTransform = slide };
+            Paint(thumb, Border.BackgroundProperty, "SegmentThumb");
+            back.Child = new Grid { Children = { thumb, strip } };
 
-            var segments = new List<Border>();
-            Action<Border> select = current =>
+            for (int i = 0; i < options.Length; i++)
             {
-                foreach (var segment in segments)
-                {
-                    if (segment == current) segment.SetResourceReference(Border.BackgroundProperty, "SegmentThumb");
-                    else segment.Background = Brushes.Transparent;
-                }
-            };
-            foreach (var option in options)
-            {
-                var value = option.Key;
-                var label = new TextBlock { Text = option.Value, FontFamily = UiFont, FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center };
-                label.SetResourceReference(TextBlock.ForegroundProperty, "Text");
-                var segment = new Border { Width = 34, Height = 18, CornerRadius = new CornerRadius(4), Background = Brushes.Transparent, Child = label, Cursor = Cursors.Hand };
+                var value = options[i].Key;
+                double position = i * SegmentWidth;
+                var label = new TextBlock { Text = options[i].Value, FontFamily = UiFont, FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center };
+                Paint(label, TextBlock.ForegroundProperty, "Text");
+                var segment = new Border { Width = SegmentWidth, Height = 18, Background = Brushes.Transparent, Child = label, Cursor = Cursors.Hand };
                 segment.MouseLeftButtonUp += delegate
                 {
-                    select(segment);
+                    var ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
+                    slide.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(position, TimeSpan.FromMilliseconds(240)) { EasingFunction = ease });
                     onSelect(value);
                 };
-                segments.Add(segment);
                 strip.Children.Add(segment);
             }
-            select(segments[options.ToList().FindIndex(o => o.Key == selected)]);
 
             var row = AddRow(text, "Text", back, null);
             row.Cursor = Cursors.Arrow;
@@ -160,7 +156,7 @@ namespace DoubleCtrl
         public void AddGroupGap()
         {
             var gap = new Border { Height = 5 };
-            gap.SetResourceReference(Border.BackgroundProperty, "MenuGap");
+            Paint(gap, Border.BackgroundProperty, "MenuGap");
             _rows.Children.Add(gap);
         }
 
@@ -200,7 +196,7 @@ namespace DoubleCtrl
                 && _items.Contains((Border)_rows.Children[_rows.Children.Count - 1]))
             {
                 var line = new Border { Height = 1, Margin = new Thickness(12, 0, 0, 0) };
-                line.SetResourceReference(Border.BackgroundProperty, "MenuLine");
+                Paint(line, Border.BackgroundProperty, "MenuLine");
                 _rows.Children.Add(line);
             }
 
@@ -211,19 +207,24 @@ namespace DoubleCtrl
                 content.Children.Add(trailing);
             }
             var label = new TextBlock { Text = text, FontFamily = UiFont, FontSize = FontSize, VerticalAlignment = VerticalAlignment.Center };
-            label.SetResourceReference(TextBlock.ForegroundProperty, foreground);
+            Paint(label, TextBlock.ForegroundProperty, foreground);
             content.Children.Add(label);
 
             var row = new Border { Height = RowHeight, Padding = new Thickness(12, 0, 10, 0), Background = Brushes.Transparent, Child = content, Cursor = Cursors.Hand };
             if (onClick != null)
             {
-                row.MouseEnter += delegate { row.SetResourceReference(Border.BackgroundProperty, "MenuHover"); };
+                row.MouseEnter += delegate { row.Background = Theme.Get("MenuHover"); };
                 row.MouseLeave += delegate { row.Background = Brushes.Transparent; };
                 row.MouseLeftButtonUp += delegate { onClick(); };
             }
             _items.Add(row);
             _rows.Children.Add(row);
             return row;
+        }
+
+        private static void Paint(DependencyObject target, DependencyProperty property, string key)
+        {
+            target.SetValue(property, Theme.Get(key));
         }
 
         private void Open(double originX, double originY)

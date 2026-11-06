@@ -12,6 +12,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
@@ -28,6 +29,9 @@ namespace DoubleCtrl
         private const double NonResultsHeight = 170;
         private const double MenuReopenGuardMs = 300;
         private const double MenuWidth = 176;
+        private const double CollapsedScale = 0.72;
+        private static readonly TimeSpan OpenDuration = TimeSpan.FromMilliseconds(200);
+        private static readonly TimeSpan CloseDuration = TimeSpan.FromMilliseconds(150);
 
         private static readonly KeyValuePair<string, string>[] Languages =
         {
@@ -56,11 +60,12 @@ namespace DoubleCtrl
         private readonly ScrollViewer _scroller;
         private readonly Button _pin, _more, _clear, _lang, _moreLink;
         private readonly TextBlock _langText;
-        private readonly FrameworkElement _bottomGap, _titleBar, _card;
+        private readonly FrameworkElement _bottomGap, _titleBar, _card, _root;
+        private readonly ScaleTransform _scale = new ScaleTransform(1, 1);
         private readonly DispatcherTimer _typingTimer, _hoverTimer;
         private readonly IntPtr _hwnd;
 
-        private bool _pinned, _settingText, _hovering, _inputMode, _growUp;
+        private bool _pinned, _settingText, _hovering, _inputMode, _growUp, _closing;
         private IosMenu _menu;
         private object _menuOwner, _lastMenuOwner;
         private int _menuClosedTick;
@@ -102,14 +107,15 @@ namespace DoubleCtrl
                 _hovering = false;
                 UpdateTitleBar();
             };
-            var root = Find<FrameworkElement>("Root");
-            root.MouseEnter += delegate
+            _root = Find<FrameworkElement>("Root");
+            _root.RenderTransform = _scale;
+            _root.MouseEnter += delegate
             {
                 _hoverTimer.Stop();
                 _hovering = true;
                 UpdateTitleBar();
             };
-            root.MouseLeave += delegate { _hoverTimer.Start(); };
+            _root.MouseLeave += delegate { _hoverTimer.Start(); };
 
             _titleBar.MouseLeftButtonDown += delegate { DragWindow(); };
             Find<Button>("CloseButton").Click += delegate { Close(); };
@@ -174,7 +180,17 @@ namespace DoubleCtrl
         {
             _typingTimer.Stop();
             if (_menuOwner != null) CloseMenu();
-            _window.Hide();
+            if (!_window.IsVisible || _closing) return;
+            _closing = true;
+            var collapse = Animate(CollapsedScale, CloseDuration, EasingMode.EaseIn);
+            // 收缩途中又弹出时 _closing 已被清掉，这里不能再把窗口藏起来。
+            collapse.Completed += delegate
+            {
+                if (!_closing) return;
+                _closing = false;
+                _window.Hide();
+            };
+            Start(collapse, 0, CloseDuration);
         }
 
         // 用户主动关闭：同时解除固定，下次弹出恢复点击外部自动隐藏。
@@ -191,7 +207,7 @@ namespace DoubleCtrl
                 if (_menu.ContainsCursor()) return;
                 CloseMenu();
             }
-            if (!_window.IsVisible || _pinned) return;
+            if (!_window.IsVisible || _closing || _pinned) return;
             Native.POINT cursor;
             Native.RECT rect;
             Native.GetCursorPos(out cursor);
@@ -213,8 +229,40 @@ namespace DoubleCtrl
 
         private void Reveal()
         {
-            if (!_window.IsVisible) _window.Show();
+            bool hidden = !_window.IsVisible;
+            if (hidden || _closing)
+            {
+                _closing = false;
+                // 动画先于 Show 启动，窗口第一帧就是收缩状态，不会闪一下完整大小。
+                SetAnimationOrigin();
+                Start(Animate(1, OpenDuration, EasingMode.EaseOut), 1, OpenDuration, hidden);
+            }
+            if (hidden) _window.Show();
             Native.SetWindowPos(_hwnd, Native.HWND_TOPMOST, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+        }
+
+        private static DoubleAnimation Animate(double to, TimeSpan duration, EasingMode mode)
+        {
+            return new DoubleAnimation(to, duration) { EasingFunction = new CubicEase { EasingMode = mode } };
+        }
+
+        private void Start(DoubleAnimation scale, double opacity, TimeSpan duration, bool fromCollapsed = false)
+        {
+            if (fromCollapsed) scale.From = CollapsedScale;
+            _scale.BeginAnimation(ScaleTransform.ScaleXProperty, scale);
+            _scale.BeginAnimation(ScaleTransform.ScaleYProperty, scale);
+            var fade = new DoubleAnimation(opacity, duration);
+            if (fromCollapsed) fade.From = 0;
+            _root.BeginAnimation(UIElement.OpacityProperty, fade);
+        }
+
+        // 缩放中心放在可见卡片的中心。标题栏隐藏时卡片上方是透明区，不能用整个窗口的中心。
+        private void SetAnimationOrigin()
+        {
+            double height = _root.ActualHeight;
+            if (height <= TitleHeight) return;
+            double top = _titleBar.Visibility == Visibility.Visible ? 0 : TitleHeight;
+            _root.RenderTransformOrigin = new Point(0.5, (top + (height - top) / 2) / height);
         }
 
         // 后台进程直接调用 SetForegroundWindow 会被前台锁拒绝，要先挂到当前前台线程上。
