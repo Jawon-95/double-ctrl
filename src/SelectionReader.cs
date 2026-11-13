@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -22,13 +23,17 @@ namespace DoubleCtrl
         private const int ClipboardSettleMs = 30;
 
         // 这些程序里没有选区时 Ctrl+C 是中断信号，只能用 Ctrl+Insert。
-        private static readonly HashSet<string> TerminalProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        private static readonly HashSet<string> ConsoleProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "windowsterminal", "openconsole", "conhost", "cmd", "powershell", "pwsh", "mintty", "putty", "kitty",
             "xshell", "securecrt", "mobaxterm", "alacritty", "wezterm-gui", "hyper", "tabby",
+        };
+
+        private static readonly HashSet<string> TerminalProcesses = new HashSet<string>(ConsoleProcesses.Concat(new[]
+        {
             "code", "code - insiders", "cursor", "windsurf",
             "idea64", "pycharm64", "webstorm64", "goland64", "clion64", "rider64", "datagrip64", "phpstorm64", "rubymine64", "studio64",
-        };
+        }), StringComparer.OrdinalIgnoreCase);
 
         private static readonly HashSet<string> TerminalClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -99,13 +104,25 @@ namespace DoubleCtrl
 
             if (ClipboardDisabled) return null;
 
+            // 浏览器输入框里没选中文字时 Ctrl+C 不写剪贴板，只能干等到超时，弹出就慢了半秒多。
+            // 和复制同时用 UIA 看一眼焦点输入框，确认选区为空就不再等。冷启动时 UIA 慢，那就照常等剪贴板。
+            Task<bool> emptyEdit = focusClass.StartsWith("Chrome_", StringComparison.Ordinal)
+                ? Task.Run(() => IsEditWithoutSelection(pid))
+                : null;
             bool terminal = TerminalProcesses.Contains(process) || TerminalClasses.Contains(foregroundClass);
-            string copied = ReadViaClipboard(terminal);
+            string copied = ReadViaClipboard(terminal, emptyEdit);
             Log.Write("tier=clipboard terminal=" + terminal + " len=" + (copied ?? "").Length);
             return copied;
         }
 
-        private static bool IsEditClass(string name)
+        // 纯终端：输入翻译不能往这里写，粘贴的换行会直接执行命令。
+        public static bool IsConsole(string process, string foregroundClass)
+        {
+            return ConsoleProcesses.Contains(process)
+                || (TerminalClasses.Contains(foregroundClass) && !string.Equals(foregroundClass, "SunAwtFrame", StringComparison.OrdinalIgnoreCase));
+        }
+
+        public static bool IsEditClass(string name)
         {
             return string.Equals(name, "Edit", StringComparison.OrdinalIgnoreCase)
                 || name.StartsWith("WindowsForms10.EDIT", StringComparison.OrdinalIgnoreCase);
@@ -176,7 +193,29 @@ namespace DoubleCtrl
             }
         }
 
-        private string ReadViaClipboard(bool terminal)
+        // 焦点是可编辑的输入框，并且选区为空（只有光标）。拿不准时返回 false。
+        private static bool IsEditWithoutSelection(uint pid)
+        {
+            try
+            {
+                var element = AutomationElement.FocusedElement;
+                if (element == null) return false;
+                var current = element.Current;
+                if (current.ProcessId != (int)pid || current.IsPassword || current.ControlType != ControlType.Edit) return false;
+                object pattern;
+                if (!element.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) return false;
+                foreach (var range in ((TextPattern)pattern).GetSelection())
+                    if (range.GetText(1).Length > 0) return false;
+                return true;
+            }
+            catch (Exception e)
+            {
+                Log.Write("uia empty check: " + e.Message);
+                return false;
+            }
+        }
+
+        private string ReadViaClipboard(bool terminal, Task<bool> emptyEdit)
         {
             var snapshot = ClipboardSnapshot.Take();
             if (snapshot == null) return null;
@@ -187,7 +226,7 @@ namespace DoubleCtrl
             _monitor.SuppressInjected(300);
             SendCopy(terminal);
 
-            if (!WaitForClipboardChange(before, CopyTimeoutMs))
+            if (!WaitForClipboardChange(before, CopyTimeoutMs, emptyEdit))
             {
                 WatchLateCopy(snapshot, before, copyStart);
                 return null;
@@ -234,11 +273,18 @@ namespace DoubleCtrl
             return emptySelection ? null : text;
         }
 
-        private static bool WaitForClipboardChange(uint before, int timeoutMs)
+        // giveUp 完成且为 true 时提前结束等待，当作没有变化。
+        private static bool WaitForClipboardChange(uint before, int timeoutMs, Task<bool> giveUp = null)
         {
             int start = Environment.TickCount;
             while (Environment.TickCount - start < timeoutMs)
             {
+                if (giveUp != null && giveUp.Status == TaskStatus.RanToCompletion && giveUp.Result
+                    && Native.GetClipboardSequenceNumber() == before)
+                {
+                    Log.Write("clipboard wait skipped: empty edit selection ms=" + (Environment.TickCount - start));
+                    return false;
+                }
                 uint current = Native.GetClipboardSequenceNumber();
                 if (current != before)
                 {
@@ -256,7 +302,7 @@ namespace DoubleCtrl
             return false;
         }
 
-        private static void WaitForModifiersReleased()
+        public static void WaitForModifiersReleased()
         {
             int start = Environment.TickCount;
             while (Environment.TickCount - start < 200)
@@ -287,7 +333,7 @@ namespace DoubleCtrl
             Native.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Native.INPUT)));
         }
 
-        private static Native.INPUT Key(ushort vk, uint flags)
+        public static Native.INPUT Key(ushort vk, uint flags)
         {
             var input = new Native.INPUT { type = Native.INPUT_KEYBOARD };
             input.u.ki.wVk = vk;
@@ -295,14 +341,14 @@ namespace DoubleCtrl
             return input;
         }
 
-        private static string ClassOf(IntPtr hwnd)
+        public static string ClassOf(IntPtr hwnd)
         {
             var name = new StringBuilder(256);
             Native.GetClassName(hwnd, name, name.Capacity);
             return name.ToString();
         }
 
-        private static string ProcessName(uint pid)
+        public static string ProcessName(uint pid)
         {
             var handle = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
             if (handle == IntPtr.Zero) return "";

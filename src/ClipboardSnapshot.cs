@@ -75,13 +75,38 @@ namespace DoubleCtrl
                     _metafile = IntPtr.Zero;
                 }
                 // 恢复动作不应该在 Win+V 历史里再多出一条。
-                foreach (var name in new[] { "CanIncludeInClipboardHistory", "CanUploadToCloudClipboard" })
-                {
-                    var flag = WriteGlobal(BitConverter.GetBytes(0));
-                    if (flag != IntPtr.Zero) Native.SetClipboardData(Native.RegisterClipboardFormat(name), flag);
-                }
+                ExcludeFromHistory();
             }
             finally { Native.CloseClipboard(); }
+        }
+
+        // 输入翻译粘贴用的临时内容，同样不进 Win+V 历史。
+        public static bool SetText(string text)
+        {
+            if (!Open()) return false;
+            try
+            {
+                Native.EmptyClipboard();
+                var handle = WriteGlobal(Encoding.Unicode.GetBytes(text + "\0"));
+                if (handle == IntPtr.Zero) return false;
+                if (Native.SetClipboardData(Native.CF_UNICODETEXT, handle) == IntPtr.Zero)
+                {
+                    Native.GlobalFree(handle);
+                    return false;
+                }
+                ExcludeFromHistory();
+                return true;
+            }
+            finally { Native.CloseClipboard(); }
+        }
+
+        private static void ExcludeFromHistory()
+        {
+            foreach (var name in new[] { "CanIncludeInClipboardHistory", "CanUploadToCloudClipboard" })
+            {
+                var flag = WriteGlobal(BitConverter.GetBytes(0));
+                if (flag != IntPtr.Zero) Native.SetClipboardData(Native.RegisterClipboardFormat(name), flag);
+            }
         }
 
         public void Discard()

@@ -10,6 +10,10 @@ namespace DoubleCtrl
         public const int WM_GETTEXT = 0x000D;
         public const int WM_GETTEXTLENGTH = 0x000E;
         public const int EM_GETSEL = 0x00B0;
+        public const int EM_SETSEL = 0x00B1;
+        public const int EM_REPLACESEL = 0x00C2;
+        public const int ES_MULTILINE = 0x0004;
+        public const int ES_READONLY = 0x0800;
         public const int ES_PASSWORD = 0x0020;
         public const int GWL_STYLE = -16;
         public const uint SMTO_ABORTIFHUNG = 0x0002;
@@ -27,10 +31,13 @@ namespace DoubleCtrl
         public const ushort VK_CONTROL = 0x11;
         public const ushort VK_MENU = 0x12;
         public const ushort VK_ESCAPE = 0x1B;
+        public const ushort VK_LEFT = 0x25;
         public const ushort VK_INSERT = 0x2D;
+        public const ushort VK_DELETE = 0x2E;
         public const ushort VK_LWIN = 0x5B;
         public const ushort VK_RWIN = 0x5C;
         public const ushort VK_C = 0x43;
+        public const ushort VK_V = 0x56;
 
         public const uint CF_BITMAP = 2;
         public const uint CF_METAFILEPICT = 3;
@@ -118,6 +125,33 @@ namespace DoubleCtrl
         }
 
         public delegate IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+        public delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
+
+        public const int WH_KEYBOARD_LL = 13;
+        public const uint LLKHF_EXTENDED = 0x01;
+        public const uint LLKHF_INJECTED = 0x10;
+        public const uint LLKHF_UP = 0x80;
+        public const uint WM_QUIT = 0x0012;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct KBDLLHOOKSTRUCT
+        {
+            public uint vkCode, scanCode, flags, time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetWindowsHookEx(int id, HookProc proc, IntPtr module, uint thread);
+        [DllImport("user32.dll")]
+        public static extern bool UnhookWindowsHookEx(IntPtr hook);
+        [DllImport("user32.dll")]
+        public static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")]
+        public static extern bool PostThreadMessage(uint thread, uint msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("winmm.dll")]
+        public static extern uint timeBeginPeriod(uint ms);
+        [DllImport("winmm.dll")]
+        public static extern uint timeEndPeriod(uint ms);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         public struct WNDCLASS
@@ -183,6 +217,8 @@ namespace DoubleCtrl
         [DllImport("user32.dll")]
         public static extern bool SetForegroundWindow(IntPtr hWnd);
         [DllImport("user32.dll")]
+        public static extern bool IsWindow(IntPtr hWnd);
+        [DllImport("user32.dll")]
         public static extern bool AttachThreadInput(uint attach, uint attachTo, bool on);
         [DllImport("kernel32.dll")]
         public static extern uint GetCurrentThreadId();
@@ -195,6 +231,8 @@ namespace DoubleCtrl
         public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
         [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
         public static extern IntPtr SendMessageTimeoutText(IntPtr hWnd, uint msg, IntPtr wParam, StringBuilder lParam, uint flags, uint timeout, out IntPtr result);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+        public static extern IntPtr SendMessageTimeoutString(IntPtr hWnd, uint msg, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool OpenClipboard(IntPtr owner);

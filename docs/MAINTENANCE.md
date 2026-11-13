@@ -27,6 +27,7 @@ Double Ctrl 依赖一批不受我们控制的东西：有道的非公开接口�
 | 窗口弹了但输入框是空的 | 日志 `tier=` 那行 | [取词](#取词) |
 | 剪贴板内容被改 | 日志 `tier=clipboard`、`late copy` | [剪贴板](#剪贴板) |
 | Win+V 多出条目 | 日志 `history` | [Win+V 历史](#win-v-历史) |
+| 输入翻译没弹出或写不进去 | 日志 `input target:`、`compose written=` | [输入翻译](#输入翻译) |
 | 没有声音 | 日志 `voice:`、`mci error` | [发音](#发音) |
 | 界面异常或功能突然失灵 | `%APPDATA%\DoubleCtrl\crash.log` | 按里面的异常堆栈定位，它不需要 `--debug` |
 
@@ -41,8 +42,14 @@ Double Ctrl 依赖一批不受我们控制的东西：有道的非公开接口�
 | 词典 + 句子翻译 | `POST https://dict.youdao.com/jsonapi_s?doctype=json&jsonversion=4` | `src/DictClient.cs` 的 `ApiUrl` |
 | 发音 | `GET https://dict.youdao.com/dictvoice?audio=<speech>` | `src/DictClient.cs` 的 `VoiceUrl` |
 
-请求表单：`q`（查询文本）、`le`（语言）、`t=2`、`client=web`、`keyfrom=webdict`、`dicts`（裁剪返回内容）。
-**目前不需要登录，也不需要签名。**
+请求表单：`q`（查询文本）、`le`（语言）、`t`、`sign`、`client=web`、`keyfrom=webdict`、`dicts`（裁剪返回内容）。
+**不需要登录，但必须签名。** 不签名时接口照常返回 200，可中文等查询会得到随机词条（比如“主控”查出 zed、footling），
+这是反爬手段，不会报错。签名算法取自网页版 dict.youdao.com 的前端代码（`src/DictClient.cs` 的 `QueryAsync`）：
+
+```
+t    = (q + "webdict").length % 10          // 按 UTF-16 长度
+sign = md5("web" + q + t + "Mk6hqtUp33DGGtoS63tTJbMUYjRrG1Lu" + md5(q + "webdict"))
+```
 
 响应字段和解析函数的对应关系：
 
@@ -70,6 +77,7 @@ Double Ctrl 依赖一批不受我们控制的东西：有道的非公开接口�
 | --- | --- | --- |
 | 全部 HTTP 404 | 地址变了 | 第二步找新地址，改 `ApiUrl` |
 | HTTP 403，或响应要求验证 | 开始校验 UA、来源或签名 | 第三步 |
+| “签名”项失败，中文查出随机词条 | 签名常量或算法变了 | 第三步，在网页版 JS 里搜 `sign` 找新算法 |
 | 个别“缺少字段” | 响应结构变了 | 第四步 |
 | 全部超时或连接失败 | 多半是本机网络或代理 | 不走代理再试 |
 
@@ -86,7 +94,7 @@ python tools/find_endpoints.py "<有道安装目录>"
 **第四步：响应结构变了。** 打印原始响应：
 
 ```bash
-curl -s "https://dict.youdao.com/jsonapi_s?doctype=json&jsonversion=4" --data "q=translate&le=en&t=2&client=web&keyfrom=webdict"
+curl -s "https://dict.youdao.com/jsonapi_s?doctype=json&jsonversion=4" --data "q=translate&le=en&t=6&sign=<按上面算法计算>&client=web&keyfrom=webdict"
 ```
 
 对照上面的字段表改解析函数，同时更新 `tools/check_api.py` 的 `CASES`。
@@ -127,6 +135,44 @@ curl -s "https://dict.youdao.com/jsonapi_s?doctype=json&jsonversion=4" --data "q
 - **JetBrains IDE**：没有选区时同样复制整行，但没有可靠的区分办法，属于已知限制。
 - **管理员权限窗口**：普通权限进程发不了按键，也读不了内容（UIPI）。这是系统限制，只能以管理员运行本程序。
 
+## 输入翻译
+
+没有选中文字时，`App.Capture` 调 `InputTarget.Detect` 判断焦点是不是可编辑的输入框，是就进入输入翻译
+（`PopupController.ShowCompose`），否则还是普通的输入窗口。日志里看 `input target:` 那行。
+
+- **判定**：标准 Edit 看窗口样式（排除 `ES_PASSWORD`、`ES_READONLY`）；其他控件用 UIA 的焦点元素，
+  有 ValuePattern 看 `IsReadOnly`，没有就要求 `ControlType.Edit`。都拿不到时，有系统文本光标也算。
+  终端（`SelectionReader.IsConsole`）一律不算，粘贴进去的换行会直接执行命令。
+- **Chromium 的 UIA**：取词时为了性能跳过了 Chromium 的 UIA，这里没有跳过，因为只有它能拿到网页输入框的位置。
+  只在没有选中文字时才请求一次。
+- **写入方式**，按顺序选（`InputTarget.Write`）：
+  1. Edit：`EM_SETSEL` + `EM_REPLACESEL`，不切焦点。记住上次写入的位置和内容，用户改过原输入框就按内容重新找。
+  2. ValuePattern：只用于 `NativeFrameworks` 里的框架（WPF、WinForms、UWP 等）。**网页不要用**：
+     直接改 DOM 绕过了网页编辑器的状态，界面上变了，发出去的还是旧内容。写完读回确认，没变就改用粘贴。
+  3. 粘贴（浏览器、Electron）：切回目标窗口，选中上次的译文，再 `Ctrl+V`，最后抢回前台。正常 30～90ms。
+     - **按内容定位**：UIA 的 TextPattern/ValuePattern 只用来读内容和选中文字（不用来写）。先读原输入框内容，
+       上次的译文还在就用 `TextPattern.FindText` 在光标前找到它，`Select()` 选中并等选区生效；
+       已经不在了（用户删改过）就在光标处插入。读不到内容的控件才退回按字数 `Shift+←`。
+       ProseMirror（Claude 的输入框）会把 UIA 选区当成自己的选区事务，粘贴也走它自己的流程，状态和界面一致。
+     - **读回确认**：粘贴后轮询内容，新译文出现就说明目标程序读完了剪贴板，马上恢复剪贴板、抢回前台；
+       读不到内容时才固定等 `PasteSettleMs`。内容完全没变时不更新记录，返回失败，避免下次重复插入。
+     - **拦截按键**：切走的这几十毫秒里，`KeyBlocker` 临时装低级键盘钩子扣下用户的真实按键，
+       弹窗拿回前台后由 `InputTarget.ResumeKeys` 按原顺序补发，否则打的字会落进原输入框，看起来光标在两个框之间跳。
+       钩子超过 `MaxBlockMs` 自动放行，出意外也不会锁死键盘。
+     - 剪贴板先保存再恢复，临时内容带 `CanIncludeInClipboardHistory=0`，不进 Win+V 历史。
+- **输入法拼写中不同步**：`PreviewTextInputStart/Update` 标记拼写状态，拼写中定时器到点也只是顺延，
+  否则拼音会被当成原文翻译，切走焦点还会打断候选框。
+  用户在打字时，`PopupController.UserBusy` 会推迟同步。
+  - **判断依据**：正在拼写；或者 `InputMonitor.KeyPresses` 在本次同步开始后有变化，这个计数用 Raw Input 记录全局真实按下次数，不计抬起。
+  - **停顿触发的同步**：`LastKeyTick` 还要至少 `ComposeDelayMs` 没有按键才算停下。
+  - **检查点**：同步会检查三次，分别在开始时、查完译文后（查词要几百毫秒），以及写入线程装好 `KeyBlocker` 后、切焦点之前。第三次用 `Dispatcher.BeginInvoke(Background)` 回到界面线程，确保弹窗队列里已有的按键和输入法消息先处理完。
+  - **推迟后的处理**：`Write` 返回 null，原输入框不动，重新开始计时。
+- **抢焦点期间不能隐藏**：粘贴时窗口会失去前台，`_focusAway` 让 `OnDeactivated` 跳过隐藏。
+- **位置**：`PlaceAtTarget` 选上下空间多的一侧（上方够 `ComposePreferredSpace` 就优先上方），只往远离原输入框的方向长高，
+  输入框最大高度只算这一侧的空间，超出出现滚动条。往下弹时标题栏区域也放在原输入框下面，悬停时不会盖住它。
+  每次写入后 `RefreshTargetBounds` 重新取原输入框的位置，它长高了就跟着让开。
+- **译文怎么选**：`PickTranslation` 优先整句译文，单词取第一个结果词或第一条释义的第一项。
+
 ## 剪贴板
 
 `ClipboardSnapshot` 保存全部格式后再模拟复制，读完恢复。有几个历史坑：
@@ -134,6 +180,9 @@ curl -s "https://dict.youdao.com/jsonapi_s?doctype=json&jsonversion=4" --data "q
 - **目标程序写入很慢**：Chromium 冷启动时写剪贴板可能超过 1 秒。曾因此把用户剪贴板永久覆盖。
   现在超时后 `WatchLateCopy` 会继续等 `LateCopyWindowMs`，到了再恢复。
   如果又发现内容没恢复，先把这个值调大。
+- **浏览器输入框里没选中文字**：Ctrl+C 不写剪贴板，以前要干等 `CopyTimeoutMs`，输入翻译弹出明显比记事本慢。
+  现在 Chromium 里复制时同时用 UIA 查焦点输入框（`IsEditWithoutSelection`），确认选区为空就提前结束等待，弹出约 15ms。
+  这一步只能缩短等待，不能改变结果：剪贴板一旦变了，仍以剪贴板为准。UIA 冷启动时太慢，就照常等剪贴板。
 - **等待期间用户自己复制**：靠 `InputMonitor.UserActivity` 判断，用户有操作就放弃恢复。
 - **延迟渲染的大数据**：`Take` 会触发渲染，可能卡顿，上限是 `MaxBytes`。
 - **Excel**：Ctrl+C 后单元格的虚线框不会自动消失，目前未处理。

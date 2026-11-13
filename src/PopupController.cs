@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
@@ -30,6 +31,22 @@ namespace DoubleCtrl
         private const double MenuReopenGuardMs = 300;
         private const double MenuWidth = 176;
         private const double CollapsedScale = 0.72;
+        private const int TypingDelayMs = 450;
+        private const int ComposeDelayMs = 500; // 输入翻译要等用户停下来，太快会边打字边改原输入框
+        private const int ComposeStaleMs = 5000;
+        private const int UiCheckTimeoutMs = 100;
+        private const int InputReadyTimeoutMs = 300;
+        private const int ComposeGapPx = 8;
+        private const double ComposeChromeHeight = 96; // 输入翻译时输入框以外的高度，含标题栏和阴影
+        private const double ComposeMinInputHeight = 22; // 一行
+        private static readonly Thickness BodyMargin = new Thickness(0, 6, 0, 0);
+        private static readonly Thickness InputRowMargin = new Thickness(16, 8, 12, 0);
+        private static readonly Thickness ComposeInputRowMargin = new Thickness(16, 10, 12, 10);
+        private const double ComposePreferredSpace = 260; // 上方有这么多空间就优先放在原输入框上面
+        private const double ComposeMinCardWidth = 320;
+        private const double ComposeMaxCardWidth = 600;
+        private const double DefaultWidth = 344;
+        private const double DefaultInputMaxHeight = 92;
         private static readonly TimeSpan OpenDuration = TimeSpan.FromMilliseconds(200);
         private static readonly TimeSpan CloseDuration = TimeSpan.FromMilliseconds(150);
 
@@ -53,31 +70,37 @@ namespace DoubleCtrl
         };
 
         private readonly Settings _settings;
+        private readonly InputMonitor _monitor;
         private readonly VoicePlayer _voice = new VoicePlayer();
         private readonly Window _window;
         private readonly TextBox _input;
         private readonly StackPanel _results;
         private readonly ScrollViewer _scroller;
-        private readonly Button _pin, _more, _clear, _lang, _moreLink;
+        private readonly Button _pin, _more, _clear, _lang, _moreLink, _search;
         private readonly TextBlock _langText;
-        private readonly FrameworkElement _bottomGap, _titleBar, _card, _root;
+        private readonly FrameworkElement _bottomGap, _titleBar, _card, _root, _body, _inputRow, _details;
         private readonly ScaleTransform _scale = new ScaleTransform(1, 1);
         private readonly DispatcherTimer _typingTimer, _hoverTimer;
         private readonly IntPtr _hwnd;
 
         private bool _pinned, _settingText, _hovering, _inputMode, _growUp, _closing;
+        private bool _syncing, _syncPending, _focusAway, _composing;
+        private int _composeTick;
         private IosMenu _menu;
         private object _menuOwner, _lastMenuOwner;
         private int _menuClosedTick;
         private int _queryId;
         private Native.POINT? _anchor;
         private DictResult _current;
+        private InputTarget _target; // 不为空时是输入翻译
+        private string _synced;
 
         public event Action ExitRequested;
 
-        public PopupController(Settings settings)
+        public PopupController(Settings settings, InputMonitor monitor)
         {
             _settings = settings;
+            _monitor = monitor;
             using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Popup.xaml"))
                 _window = (Window)XamlReader.Load(stream);
 
@@ -89,16 +112,25 @@ namespace DoubleCtrl
             _clear = Find<Button>("ClearButton");
             _lang = Find<Button>("LangButton");
             _moreLink = Find<Button>("MoreLink");
+            _search = Find<Button>("SearchButton");
             _langText = Find<TextBlock>("LangText");
             _bottomGap = Find<FrameworkElement>("BottomGap");
+            _body = Find<FrameworkElement>("Body");
+            _inputRow = Find<FrameworkElement>("InputRow");
+            _details = Find<FrameworkElement>("Details");
             _titleBar = Find<FrameworkElement>("TitleBar");
             _card = Find<FrameworkElement>("Card");
 
             Find<Image>("AppIcon").Source = LoadIcon();
 
             _hwnd = new WindowInteropHelper(_window).EnsureHandle();
-            _typingTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
-            _typingTimer.Tick += delegate { _typingTimer.Stop(); QueryInput(); };
+            _typingTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(TypingDelayMs) };
+            _typingTimer.Tick += delegate
+            {
+                _typingTimer.Stop();
+                if (_target != null) SyncCompose(true);
+                else QueryInput();
+            };
 
             _hoverTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _hoverTimer.Tick += delegate
@@ -119,13 +151,32 @@ namespace DoubleCtrl
 
             _titleBar.MouseLeftButtonDown += delegate { DragWindow(); };
             Find<Button>("CloseButton").Click += delegate { Close(); };
-            Find<Button>("SearchButton").Click += delegate { QueryInput(); };
+            _search.Click += delegate
+            {
+                if (_target != null) SyncCompose();
+                else QueryInput();
+            };
             _pin.Click += delegate { SetPinned(!_pinned); };
             _clear.Click += delegate { Clear(); };
             _more.Click += delegate { ShowMoreMenu(); };
             _lang.Click += delegate { ShowLanguageMenu(); };
             _moreLink.Click += delegate { OpenInBrowser(); };
 
+            // 输入法还在拼写时不能同步：拼音会被当成原文翻译，切走焦点还会打断候选框。
+            TextCompositionManager.AddPreviewTextInputStartHandler(_input, (s, e) =>
+                SetComposing(true, "start [" + e.TextComposition.CompositionText + "]"));
+            // 微软拼音等 TSF 输入法在 WPF 里更新拼写时 CompositionText 是空的，不能据此判断拼写已结束，
+            // 否则打第二个字母就当作拼完了，停顿一下就会被同步打断。拼写结束以 TextInput 为准。
+            TextCompositionManager.AddPreviewTextInputUpdateHandler(_input, (s, e) => SetComposing(true, "update"));
+            TextCompositionManager.AddPreviewTextInputHandler(_input, (s, e) => SetComposing(false, "text [" + e.Text + "]"));
+            _input.LostKeyboardFocus += (s, e) =>
+            {
+                Log.Write("compose input lost focus to=" + (e.NewFocus == null ? "null" : e.NewFocus.GetType().Name) + " away=" + _focusAway);
+                if (!_focusAway) SetComposing(false, "lost focus");
+            };
+            _input.GotKeyboardFocus += delegate { if (_target != null) Log.Write("compose input got focus"); };
+            _window.Activated += delegate { if (_target != null) Log.Write("compose window activated"); };
+            _window.Deactivated += delegate { if (_target != null) Log.Write("compose window deactivated fg=" + SelectionReader.ClassOf(Native.GetForegroundWindow())); };
             _input.TextChanged += OnInputChanged;
             _input.PreviewKeyDown += OnInputKeyDown;
             _window.PreviewKeyDown += OnWindowKeyDown;
@@ -143,6 +194,7 @@ namespace DoubleCtrl
         // 有选中文字：不抢焦点，否则资源管理器的重命名框一失焦就会提交退出。
         public void ShowSelection(string text, Native.POINT anchor)
         {
+            ExitCompose();
             SetInput(text);
             _inputMode = false;
             UpdateTitleBar();
@@ -155,6 +207,7 @@ namespace DoubleCtrl
         // 没有选中文字：激活窗口，方便直接输入。
         public void ShowForInput(Native.POINT? anchor)
         {
+            ExitCompose();
             _inputMode = true;
             UpdateTitleBar();
             if (anchor.HasValue) MoveTo(anchor.Value);
@@ -167,9 +220,35 @@ namespace DoubleCtrl
             _input.SelectAll();
         }
 
-        // 窗口里按双击 Ctrl：有选中文字就原地重新翻译，不改变窗口。
+        // 输入翻译：窗口贴着原输入框弹出并接管键盘，停顿后把译文写回原输入框。
+        // 标题栏和普通模式一样只在悬停时出现，语言、固定、关闭都复用。
+        public void ShowCompose(InputTarget target)
+        {
+            _target = target;
+            _synced = "";
+            _inputMode = false;
+            SetPinned(false);
+            ApplyComposeLayout();
+            SetInput("");
+            _details.Visibility = Visibility.Collapsed;
+            UpdateTitleBar();
+            _window.UpdateLayout();
+            PlaceAtTarget();
+            _window.ShowActivated = false;
+            Reveal();
+            TakeForeground();
+            _window.Activate();
+            _input.Focus();
+        }
+
+        // 窗口里按双击 Ctrl：有选中文字就原地重新翻译，不改变窗口。输入翻译时立即写回。
         public void OnDoubleCtrlInside()
         {
+            if (_target != null)
+            {
+                SyncCompose();
+                return;
+            }
             var box = Keyboard.FocusedElement as TextBox;
             string text = box != null ? box.SelectedText.Trim() : "";
             if (text.Length > 0) Retranslate(text);
@@ -178,7 +257,10 @@ namespace DoubleCtrl
 
         public void Hide()
         {
+            // 还没停顿就点了别处：能直接写入的把最后一段补上，需要切焦点的不能再抢回前台。
+            bool pending = _typingTimer.IsEnabled;
             _typingTimer.Stop();
+            if (pending && _target != null && !_target.NeedsFocus) SyncCompose();
             if (_menuOwner != null) CloseMenu();
             if (!_window.IsVisible || _closing) return;
             _closing = true;
@@ -345,10 +427,14 @@ namespace DoubleCtrl
             int shadow = (int)(ShadowMargin * scale);
             int topInset = (int)((ShadowMargin + TitleHeight) * scale); // 卡片上方的透明区不算占位
 
+            // 输入翻译时卡片和原输入框左对齐，往下弹时标题栏也放在原输入框下面，悬停时才不会盖住它。
+            int gap = _target != null ? (int)(ComposeGapPx * scale) : AnchorGapPx;
+            if (_target != null) topInset = shadow;
+
             int x = anchor.X - shadow;
-            if (x + width > work.Right) x = anchor.X - width + shadow; // 右边放不下就放到鼠标左侧
+            if (_target == null && x + width > work.Right) x = anchor.X - width + shadow; // 右边放不下就放到鼠标左侧
             x = Math.Max(work.Left, Math.Min(x, work.Right - width));
-            int y = _growUp ? anchor.Y - AnchorGapPx - height + shadow : anchor.Y + AnchorGapPx - topInset;
+            int y = _growUp ? anchor.Y - gap - height + shadow : anchor.Y + gap - topInset;
             y = Math.Max(work.Top, Math.Min(y, work.Bottom - height));
             Native.SetWindowPos(_hwnd, IntPtr.Zero, x, y, 0, 0, Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
         }
@@ -388,16 +474,21 @@ namespace DoubleCtrl
         {
             _window.Dispatcher.BeginInvoke(new Action(delegate
             {
-                if (!_pinned && _menu == null && Native.GetForegroundWindow() != _hwnd) Hide();
+                if (!_pinned && _menu == null && !_focusAway && Native.GetForegroundWindow() != _hwnd) Hide();
             }), DispatcherPriority.Background);
         }
 
         private void OnInputChanged(object sender, TextChangedEventArgs e)
         {
             _clear.Visibility = _input.Text.Length > 0 ? Visibility.Visible : Visibility.Hidden;
-            _input.FontSize = _input.Text.Length > 24 ? 14 : 20;
+            if (_target == null) _input.FontSize = _input.Text.Length > 24 ? 14 : 20;
             if (_settingText) return;
             _typingTimer.Stop();
+            if (_target != null)
+            {
+                _typingTimer.Start();
+                return;
+            }
             if (_input.Text.Trim().Length == 0) ShowHint();
             else _typingTimer.Start();
         }
@@ -405,9 +496,11 @@ namespace DoubleCtrl
         private void OnInputKeyDown(object sender, KeyEventArgs e)
         {
             if (e.Key != Key.Enter) return;
+            if (_target != null && (Keyboard.Modifiers & ModifierKeys.Shift) != 0) return; // AcceptsReturn 会插入换行
             e.Handled = true;
             _typingTimer.Stop();
-            QueryInput();
+            if (_target != null) SyncCompose();
+            else QueryInput();
         }
 
         private void OnWindowKeyDown(object sender, KeyEventArgs e)
@@ -434,6 +527,12 @@ namespace DoubleCtrl
 
         private void Clear()
         {
+            if (_target != null)
+            {
+                _input.Clear(); // 走 TextChanged，停顿后把原输入框里的译文也删掉
+                _input.Focus();
+                return;
+            }
             SetInput("");
             ShowHint();
             _input.Focus();
@@ -480,6 +579,239 @@ namespace DoubleCtrl
                 Log.Write("query failed: " + e);
                 ShowMessage("翻译失败，请检查网络后重试。");
             }
+        }
+
+        private void ApplyComposeLayout()
+        {
+            double scale = VisualTreeHelper.GetDpi(_window).DpiScaleX;
+            var bounds = _target.Bounds;
+            double card = Math.Max(ComposeMinCardWidth, Math.Min(ComposeMaxCardWidth, (bounds.Right - bounds.Left) / scale));
+            _window.Width = card + 2 * ShadowMargin;
+            _input.FontSize = 14;
+            _input.FontWeight = FontWeights.Normal;
+            _input.AcceptsReturn = true;
+            _input.MinHeight = ComposeMinInputHeight;
+            _body.Margin = new Thickness(0);
+            _inputRow.Margin = ComposeInputRowMargin;
+            _search.Visibility = Visibility.Collapsed; // 停顿后会自动翻译，不需要按钮
+            _typingTimer.Interval = TimeSpan.FromMilliseconds(ComposeDelayMs);
+        }
+
+        private void ExitCompose()
+        {
+            if (_target == null) return;
+            _target = null;
+            _typingTimer.Stop();
+            _window.Width = DefaultWidth;
+            _input.FontWeight = FontWeights.SemiBold;
+            _input.AcceptsReturn = false;
+            _input.MinHeight = 0;
+            _input.MaxHeight = DefaultInputMaxHeight;
+            _body.Margin = BodyMargin;
+            _inputRow.Margin = InputRowMargin;
+            _details.Visibility = Visibility.Visible;
+            ShowHint();
+            _search.Visibility = Visibility.Visible;
+            _typingTimer.Interval = TimeSpan.FromMilliseconds(TypingDelayMs);
+        }
+
+        // 放到原输入框上下空间多的一侧，只往远离它的方向长高；可用高度也只算这一侧，
+        // 输入再多也只是出现滚动条，不会盖住原输入框。原输入框长高后会再调用一次。
+        private void PlaceAtTarget()
+        {
+            if (_pinned) return; // 拖动过就留在用户放的位置
+            var bounds = _target.Bounds;
+            var work = WorkArea(new Native.POINT { X = (bounds.Left + bounds.Right) / 2, Y = (bounds.Top + bounds.Bottom) / 2 });
+            double scale = VisualTreeHelper.GetDpi(_window).DpiScaleY;
+            int top = Math.Max(work.Top, Math.Min(bounds.Top, work.Bottom));
+            int bottom = Math.Max(work.Top, Math.Min(bounds.Bottom, work.Bottom));
+            int above = top - work.Top, below = work.Bottom - bottom;
+            _growUp = above >= ComposePreferredSpace * scale || above >= below;
+
+            int x = Math.Max(work.Left, Math.Min(bounds.Left, work.Right));
+            _anchor = new Native.POINT { X = x, Y = _growUp ? top : bottom };
+            double space = (_growUp ? above : below) / scale;
+            _input.MaxHeight = Math.Max(ComposeMinInputHeight, space - ComposeChromeHeight);
+            PlaceAtAnchor();
+        }
+
+        private void SetComposing(bool composing, string reason)
+        {
+            if (composing != _composing) Log.Write("ime composing=" + composing + " " + reason);
+            _composing = composing;
+            _composeTick = Environment.TickCount;
+        }
+
+        // 万一输入法取消拼写时没发出结束事件，过一会儿也不再当作在拼写，免得永远不同步。
+        private bool IsComposing
+        {
+            get { return _composing && Environment.TickCount - _composeTick < ComposeStaleMs; }
+        }
+
+        // 用户还在打字：正在拼写，或者自 keys 记下以后又按过键。停顿触发的同步还要求最近一段时间没按键，
+        // 拼音键不一定都会改动文字，只看文字变化会在拼写中途误以为停下了。
+        private bool UserBusy(int keys, bool waitForPause)
+        {
+            if (IsComposing || _monitor.KeyPresses != keys) return true;
+            return waitForPause && Environment.TickCount - _monitor.LastKeyTick < ComposeDelayMs;
+        }
+
+        // 在写入线程里调用。按 Background 优先级排到界面线程上，弹窗队列里已有的按键和输入法消息会先处理完，
+        // 读到的拼写状态才是最新的。界面线程卡住时不拦，照常写入。
+        private bool UserBusyOnUi(int keys)
+        {
+            var op = _window.Dispatcher.BeginInvoke(new Func<bool>(() => UserBusy(keys, false)), DispatcherPriority.Background);
+            if (op.Wait(TimeSpan.FromMilliseconds(UiCheckTimeoutMs)) == DispatcherOperationStatus.Completed) return (bool)op.Result;
+            op.Abort();
+            return false;
+        }
+
+        // 先让激活、焦点切换、输入法切换这些消息处理完，再确认弹窗是前台、输入框有键盘焦点。
+        private async Task WaitForInputReady()
+        {
+            int start = Environment.TickCount;
+            bool ready;
+            do
+            {
+                await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+                ready = Native.GetForegroundWindow() == _hwnd && _input.IsKeyboardFocused;
+            } while (!ready && Environment.TickCount - start < InputReadyTimeoutMs);
+            Log.Write("compose input ready=" + ready + " ms=" + (Environment.TickCount - start));
+        }
+
+        // auto：停顿触发的同步。Enter、双击 Ctrl 等主动触发的不用等停顿，但仍不能打断拼写。
+        private async void SyncCompose(bool auto = false)
+        {
+            _typingTimer.Stop();
+            var target = _target;
+            if (target == null) return;
+            int keys = _monitor.KeyPresses;
+            if (UserBusy(keys, auto))
+            {
+                _typingTimer.Start();
+                return;
+            }
+            if (_syncing)
+            {
+                _syncPending = true;
+                return;
+            }
+            string text = _input.Text.Trim();
+            if (text == _synced) return;
+
+            int id = ++_queryId;
+            _syncing = true;
+            try
+            {
+                string translated = "";
+                if (text.Length > 0)
+                {
+                    var result = await DictClient.QueryAsync(text, _settings.Le);
+                    translated = PickTranslation(result);
+                    if (target != _target) return;
+                    if (translated == null)
+                    {
+                        if (id == _queryId) ShowComposeError("没有找到译文。");
+                        return;
+                    }
+                }
+
+                // 查译文要几百毫秒，这期间用户可能已经接着打字了。
+                if (target != _target) return;
+                if (UserBusy(keys, false))
+                {
+                    Log.Write("compose deferred, user typing");
+                    _typingTimer.Start();
+                    return;
+                }
+
+                _focusAway = target.NeedsFocus;
+                bool? written = false;
+                ExceptionDispatchInfo error = null;
+                try { written = await Task.Run(() => target.Write(translated, () => UserBusyOnUi(keys))); }
+                catch (Exception e) { error = ExceptionDispatchInfo.Capture(e); }
+                // 直接写入失败时会退回粘贴，所以写完再看一次 NeedsFocus。
+                bool restore = (_focusAway || target.NeedsFocus) && target == _target && _window.IsVisible && !_closing;
+                if (restore)
+                {
+                    TakeForeground();
+                    _window.Activate();
+                    _input.Focus();
+                }
+                _focusAway = false;
+                // 弹窗真正拿回前台和键盘焦点后再补发。补发早了按键会绕过输入法，拼音直接以字母上屏。
+                if (restore) await WaitForInputReady();
+                target.ResumeKeys();
+                if (error != null) error.Throw();
+                Log.Write("compose written=" + written + " len=" + translated.Length);
+                if (target != _target) return;
+                if (written == null)
+                {
+                    _typingTimer.Start();
+                    return;
+                }
+                if (written == false)
+                {
+                    if (id == _queryId) ShowWriteFailure(translated);
+                    return;
+                }
+                _synced = text;
+                if (id == _queryId) _details.Visibility = Visibility.Collapsed;
+                RefreshTargetBounds(target);
+            }
+            catch (Exception e)
+            {
+                _focusAway = false;
+                if (target != _target || id != _queryId) return;
+                Log.Write("compose failed: " + e);
+                ShowComposeError("翻译失败，请检查网络后重试。");
+            }
+            finally
+            {
+                _syncing = false;
+                if (_syncPending)
+                {
+                    _syncPending = false;
+                    if (!_typingTimer.IsEnabled) SyncCompose();
+                }
+            }
+        }
+
+        private async void RefreshTargetBounds(InputTarget target)
+        {
+            var bounds = await Task.Run(() => target.ReadBounds());
+            if (target != _target || !bounds.HasValue) return;
+            var old = target.Bounds;
+            var now = bounds.Value;
+            if (old.Left == now.Left && old.Top == now.Top && old.Right == now.Right && old.Bottom == now.Bottom) return;
+            target.Bounds = now;
+            Log.Write("compose target moved " + now.Left + "," + now.Top + "," + now.Right + "," + now.Bottom);
+            PlaceAtTarget();
+        }
+
+        // 句子用整句译文；单词取第一个释义里的第一项，原输入框里只需要一个词。
+        private static string PickTranslation(DictResult result)
+        {
+            if (!string.IsNullOrEmpty(result.Sentence)) return result.Sentence;
+            var word = result.Entries.FirstOrDefault(e => e.IsWord);
+            if (word != null) return word.Text;
+            var entry = result.Entries.FirstOrDefault();
+            string text = entry != null ? entry.Text : result.Web.FirstOrDefault();
+            if (string.IsNullOrEmpty(text)) return null;
+            return text.Split(new[] { '；', ';', '，', ',' }, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+        }
+
+        private void ShowWriteFailure(string translated)
+        {
+            ShowComposeError("没能写入原输入框，可以复制译文自己粘贴：");
+            _results.Children.Add(BuildSentence(new DictResult { Sentence = translated }));
+        }
+
+        // 输入翻译平时只有一行输入框，出错时才展开下面的提示区。
+        private void ShowComposeError(string text)
+        {
+            ShowMessage(text);
+            _details.Visibility = Visibility.Visible;
         }
 
         private void Render(DictResult result)
@@ -649,7 +981,12 @@ namespace DoubleCtrl
                     _settings.Le = language.Key;
                     _settings.Save();
                     UpdateLanguageLabel();
-                    if (_input.Text.Trim().Length > 0) QueryInput();
+                    if (_target != null)
+                    {
+                        _synced = null;
+                        SyncCompose();
+                    }
+                    else if (_input.Text.Trim().Length > 0) QueryInput();
                 });
             }
             OpenMenu(menu, _lang);

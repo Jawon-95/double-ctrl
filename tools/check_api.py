@@ -5,6 +5,7 @@
 
 全部通过时退出码为 0。失败项对应的修复方法见 docs/MAINTENANCE.md。
 """
+import hashlib
 import json
 import sys
 import urllib.parse
@@ -16,8 +17,22 @@ DICTS = '{"count":99,"dicts":[["ec","ce","newcj","newjc","kc","ck","fc","cf","mu
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) DoubleCtrl/1.0'
 
 
+SIGN_KEY = 'Mk6hqtUp33DGGtoS63tTJbMUYjRrG1Lu'
+
+
+def md5(text):
+    return hashlib.md5(text.encode('utf-8')).hexdigest()
+
+
+# 和 src/DictClient.cs 的签名一致。注意 C# 的 Length 按 UTF-16 计数，这里也按 UTF-16 算。
+def sign(text):
+    t = str((len((text + 'webdict').encode('utf-16-le')) // 2) % 10)
+    return t, md5('web' + text + t + SIGN_KEY + md5(text + 'webdict'))
+
+
 def query(text, le):
-    body = urllib.parse.urlencode({'q': text, 'le': le, 't': 2, 'client': 'web', 'keyfrom': 'webdict', 'dicts': DICTS})
+    t, s = sign(text)
+    body = urllib.parse.urlencode({'q': text, 'le': le, 't': t, 'sign': s, 'client': 'web', 'keyfrom': 'webdict', 'dicts': DICTS})
     request = urllib.request.Request(API, body.encode(), {'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded'})
     with urllib.request.urlopen(request, timeout=15) as response:
         return json.load(response)
@@ -58,6 +73,16 @@ def main():
             value, detail = None, ' %s: %s' % (type(error).__name__, error)
         failed += 0 if value else 1
         print(('通过 ' if value else '失败 ') + name + detail)
+
+    # 签名失效时接口不报错，而是对中文返回随机词条，所以要核对内容本身。
+    try:
+        word = path(query('主控', 'en'), 'ce', 'word', 'trs', '#text')
+        ok = word == 'master control'
+        detail = '' if ok else ' 返回了 %r，签名可能失效' % word
+    except Exception as error:
+        ok, detail = False, ' %s: %s' % (type(error).__name__, error)
+    failed += 0 if ok else 1
+    print(('通过 ' if ok else '失败 ') + '签名（主控 → master control）' + detail)
 
     try:
         request = urllib.request.Request(VOICE + 'translate&type=2', headers={'User-Agent': UA})

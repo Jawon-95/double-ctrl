@@ -45,6 +45,9 @@ namespace DoubleCtrl
         private const string VoiceUrl = "https://dict.youdao.com/dictvoice?audio=";
         private const string Dicts = "{\"count\":99,\"dicts\":[[\"ec\",\"ce\",\"newcj\",\"newjc\",\"kc\",\"ck\",\"fc\",\"cf\",\"multle\"],[\"web_trans\"],[\"fanyi\"]]}";
         private const int MaxWeb = 5;
+        private const string Client = "web";
+        private const string KeyFrom = "webdict";
+        private const string SignKey = "Mk6hqtUp33DGGtoS63tTJbMUYjRrG1Lu"; // 网页版 dict.youdao.com 前端里的签名常量
 
         private static readonly HttpClient Http = CreateClient();
         private static readonly Regex Tags = new Regex("<[^>]+>", RegexOptions.Compiled);
@@ -69,7 +72,12 @@ namespace DoubleCtrl
             var form = new StringBuilder();
             form.Append("q=").Append(Uri.EscapeDataString(text));
             form.Append("&le=").Append(le);
-            form.Append("&t=2&client=web&keyfrom=webdict&dicts=").Append(Uri.EscapeDataString(Dicts));
+            // 不带签名时接口对中文等查询会返回随机词条（反爬），必须按网页版算法签名。
+            string t = ((text + KeyFrom).Length % 10).ToString();
+            string sign = Md5(Client + text + t + SignKey + Md5(text + KeyFrom));
+            form.Append("&t=").Append(t).Append("&sign=").Append(sign);
+            form.Append("&client=").Append(Client).Append("&keyfrom=").Append(KeyFrom);
+            form.Append("&dicts=").Append(Uri.EscapeDataString(Dicts));
             var content = new StringContent(form.ToString(), Encoding.UTF8, "application/x-www-form-urlencoded");
             var response = await Http.PostAsync(ApiUrl, content).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
@@ -79,6 +87,16 @@ namespace DoubleCtrl
             // 接口改版时最先出现的症状就是解析不出内容，留下原始响应方便排查。
             if (result.IsEmpty) Log.Write("empty result, raw: " + json.Substring(0, Math.Min(json.Length, 800)));
             return result;
+        }
+
+        private static string Md5(string s)
+        {
+            using (var md5 = System.Security.Cryptography.MD5.Create())
+            {
+                var sb = new StringBuilder(32);
+                foreach (byte b in md5.ComputeHash(Encoding.UTF8.GetBytes(s))) sb.Append(b.ToString("x2"));
+                return sb.ToString();
+            }
         }
 
         public static Task<byte[]> DownloadVoiceAsync(string speech)

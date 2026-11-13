@@ -24,11 +24,23 @@ namespace DoubleCtrl
         private int _downTick, _upTick;
         private int _suppressUntil;
         private int _userActivity;
+        private int _keyPresses, _lastKeyTick = Environment.TickCount - 60000;
 
         // 每次用户按键或点击鼠标都会变化，用来判断等待期间用户有没有自己操作。
         public int UserActivity
         {
             get { return Volatile.Read(ref _userActivity); }
+        }
+
+        // 只算按下（含长按的自动重复），不算抬起：按 Enter 触发同步后松开 Enter 不能算作又开始打字。
+        public int KeyPresses
+        {
+            get { return Volatile.Read(ref _keyPresses); }
+        }
+
+        public int LastKeyTick
+        {
+            get { return Volatile.Read(ref _lastKeyTick); }
         }
 
         public void Start()
@@ -105,7 +117,12 @@ namespace DoubleCtrl
         private void OnKey(ushort vkey, ushort flags)
         {
             bool up = (flags & KeyBreak) != 0;
-            if (!up) Interlocked.Increment(ref _userActivity);
+            if (!up)
+            {
+                Interlocked.Increment(ref _userActivity);
+                Volatile.Write(ref _lastKeyTick, Environment.TickCount);
+                Interlocked.Increment(ref _keyPresses);
+            }
             // Pause 键会带一个伪造的 Ctrl（E1 前缀），不算真实按键。
             if (vkey == Native.VK_CONTROL && (flags & KeyE1) == 0)
             {

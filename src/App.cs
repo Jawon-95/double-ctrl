@@ -11,8 +11,8 @@ using Application = System.Windows.Application;
 
 [assembly: AssemblyTitle("Double Ctrl")]
 [assembly: AssemblyProduct("Double Ctrl")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace DoubleCtrl
 {
@@ -83,7 +83,7 @@ namespace DoubleCtrl
                 if (_settings.Theme == Theme.System) OnUi(delegate { Theme.Apply(Theme.System); });
             };
 
-            _popup = new PopupController(_settings);
+            _popup = new PopupController(_settings, _monitor);
             _popup.ExitRequested += Exit;
             CreateTray();
 
@@ -163,7 +163,14 @@ namespace DoubleCtrl
             string text = Normalize(_reader.Read(foreground));
 
             Log.Write("captured: [" + text + "]");
-            if (text.Length > 0) OnUi(delegate { _popup.ShowSelection(text, anchor); });
+            if (text.Length > 0)
+            {
+                OnUi(delegate { _popup.ShowSelection(text, anchor); });
+                return;
+            }
+            // 没选中文字但焦点在输入框里：打开输入翻译，译文写回这个输入框。
+            var target = InputTarget.Detect(foreground, _monitor);
+            if (target != null) OnUi(delegate { _popup.ShowCompose(target); });
             else OnUi(delegate { _popup.ShowForInput(anchor); });
         }
 
