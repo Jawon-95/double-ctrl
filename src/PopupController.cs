@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Markup;
@@ -21,7 +22,7 @@ namespace DoubleCtrl
 {
     internal sealed class PopupController
     {
-        private const string HintText = "选中文字后双击 Ctrl 即可翻译，也可以在上方直接输入。";
+        private const string HintText = "选中文字后双击 Ctrl 翻译";
         private const int AnchorGapPx = 14;
         private const double ShadowMargin = 12;
         private const double TitleHeight = 42;
@@ -29,8 +30,8 @@ namespace DoubleCtrl
         private const double MaxResultsHeight = 340;
         private const double NonResultsHeight = 170;
         private const double MenuReopenGuardMs = 300;
-        private const double MenuWidth = 176;
-        private const double LanguageMenuWidth = 232;
+        private const double MenuWidth = 200;
+        private const double LanguageMenuWidth = 120;
         private const double CollapsedScale = 0.72;
         private const int TypingDelayMs = 450;
         private const int ComposeDelayMs = 500; // 输入翻译要等用户停下来，太快会边打字边改原输入框
@@ -52,32 +53,6 @@ namespace DoubleCtrl
         private static readonly TimeSpan OpenDuration = TimeSpan.FromMilliseconds(200);
         private static readonly TimeSpan CloseDuration = TimeSpan.FromMilliseconds(150);
 
-        private static readonly KeyValuePair<string, string>[] Languages =
-        {
-            new KeyValuePair<string, string>("en", "英汉互译"),
-            new KeyValuePair<string, string>("fr", "法汉互译"),
-            new KeyValuePair<string, string>("ja", "日汉互译"),
-            new KeyValuePair<string, string>("ko", "韩汉互译"),
-            new KeyValuePair<string, string>("de", "德汉互译"),
-            new KeyValuePair<string, string>("es", "西汉互译"),
-            new KeyValuePair<string, string>("ru", "俄汉互译"),
-            new KeyValuePair<string, string>("pt", "葡汉互译"),
-        };
-
-        // 自动检测原文语种，译成选定的语言。
-        private static readonly KeyValuePair<string, string>[] AutoTargets =
-        {
-            new KeyValuePair<string, string>(DictClient.AutoPrefix + "zh", "中文"),
-            new KeyValuePair<string, string>(DictClient.AutoPrefix + "en", "英文"),
-            new KeyValuePair<string, string>(DictClient.AutoPrefix + "ja", "日文"),
-            new KeyValuePair<string, string>(DictClient.AutoPrefix + "ko", "韩文"),
-            new KeyValuePair<string, string>(DictClient.AutoPrefix + "fr", "法文"),
-            new KeyValuePair<string, string>(DictClient.AutoPrefix + "de", "德文"),
-            new KeyValuePair<string, string>(DictClient.AutoPrefix + "es", "西班牙文"),
-            new KeyValuePair<string, string>(DictClient.AutoPrefix + "ru", "俄文"),
-            new KeyValuePair<string, string>(DictClient.AutoPrefix + "pt", "葡萄牙文"),
-        };
-
         private static readonly KeyValuePair<string, string>[] ThemeOptions =
         {
             new KeyValuePair<string, string>(Theme.System, "系统"),
@@ -92,8 +67,7 @@ namespace DoubleCtrl
         private readonly TextBox _input;
         private readonly StackPanel _results;
         private readonly ScrollViewer _scroller;
-        private readonly Button _pin, _more, _clear, _lang, _moreLink, _search;
-        private readonly TextBlock _langText;
+        private readonly Button _pin, _more, _clear, _moreLink, _search;
         private readonly FrameworkElement _bottomGap, _titleBar, _card, _root, _body, _inputRow, _details;
         private readonly ScaleTransform _scale = new ScaleTransform(1, 1);
         private readonly DispatcherTimer _typingTimer, _hoverTimer;
@@ -110,6 +84,7 @@ namespace DoubleCtrl
         private DictResult _current;
         private InputTarget _target; // 不为空时是输入翻译
         private string _synced;
+        private Action _languageChanged; // 标题栏和打开着的菜单里的语言控件都要刷新
 
         public event Action ExitRequested;
 
@@ -126,10 +101,8 @@ namespace DoubleCtrl
             _pin = Find<Button>("PinButton");
             _more = Find<Button>("MoreButton");
             _clear = Find<Button>("ClearButton");
-            _lang = Find<Button>("LangButton");
             _moreLink = Find<Button>("MoreLink");
             _search = Find<Button>("SearchButton");
-            _langText = Find<TextBlock>("LangText");
             _bottomGap = Find<FrameworkElement>("BottomGap");
             _body = Find<FrameworkElement>("Body");
             _inputRow = Find<FrameworkElement>("InputRow");
@@ -175,7 +148,6 @@ namespace DoubleCtrl
             _pin.Click += delegate { SetPinned(!_pinned); };
             _clear.Click += delegate { Clear(); };
             _more.Click += delegate { ShowMoreMenu(); };
-            _lang.Click += delegate { ShowLanguageMenu(); };
             _moreLink.Click += delegate { OpenInBrowser(); };
 
             // 输入法还在拼写时不能同步：拼音会被当成原文翻译，切走焦点还会打断候选框。
@@ -199,13 +171,15 @@ namespace DoubleCtrl
             _window.Deactivated += OnDeactivated;
             _window.SizeChanged += delegate { PlaceAtAnchor(); };
 
-            UpdateLanguageLabel();
+            Find<ContentControl>("LangHost").Content = BuildLanguagePair(null);
             ShowHint();
         }
 
         public IntPtr Handle { get { return _hwnd; } }
 
         public bool IsVisible { get { return _window.IsVisible; } }
+
+        public bool IsMenuOpen { get { return _menu != null; } }
 
         // 有选中文字：不抢焦点，否则资源管理器的重命名框一失焦就会提交退出。
         public void ShowSelection(string text, Native.POINT anchor)
@@ -305,7 +279,7 @@ namespace DoubleCtrl
         {
             if (_menu != null)
             {
-                if (_menu.ContainsCursor()) return;
+                if (_menu.HandleMouseDown()) return;
                 CloseMenu();
             }
             if (!_window.IsVisible || _closing || _pinned) return;
@@ -568,6 +542,15 @@ namespace DoubleCtrl
             _queryId++;
             _current = null;
             ShowMessage(HintText);
+            // 提示和版本号放一行，版本号靠右。
+            var hint = (TextBlock)_results.Children[0];
+            hint.TextWrapping = TextWrapping.NoWrap;
+            hint.TextTrimming = TextTrimming.CharacterEllipsis;
+            _results.Children.Clear();
+            var version = Label("v" + Updater.CurrentText, 12, "Muted");
+            version.Margin = new Thickness(8, version.Margin.Top, 0, version.Margin.Bottom);
+            DockPanel.SetDock(version, Dock.Right);
+            _results.Children.Add(new DockPanel { Children = { version, hint } });
         }
 
         private void ShowMessage(string text)
@@ -979,41 +962,150 @@ namespace DoubleCtrl
         private void OpenInBrowser()
         {
             string query = _current != null ? _current.Query : _input.Text.Trim();
-            string le = _current != null ? _current.Le : _settings.Le;
-            if (DictClient.IsAuto(le)) le = le.Substring(DictClient.AutoPrefix.Length);
-            if (le == DictClient.Chinese) le = "en"; // 网页版没有 lang=zh，中文词按中英查
+            string le = _current != null ? _current.Le : null;
+            // 网页版的 lang 是和中文互译的那门外语，没有 zh 和 auto。
+            if (le == null || le == DictClient.Chinese || le == DictClient.Auto)
+            {
+                le = DictClient.SourceOf(_settings.Le);
+                if (le == DictClient.Chinese || le == DictClient.Auto) le = DictClient.TargetOf(_settings.Le);
+                if (le == DictClient.Chinese) le = "en";
+            }
             Process.Start("https://dict.youdao.com/result?word=" + Uri.EscapeDataString(query) + "&lang=" + le);
         }
 
-        private void UpdateLanguageLabel()
+        // 源语言 ⌄ ⇄ 目标语言 ⌄。parent 为空时放在标题栏，下拉菜单是顶层菜单；否则放在菜单里，下拉菜单是子菜单。
+        private FrameworkElement BuildLanguagePair(IosMenu parent)
         {
-            var auto = AutoTargets.FirstOrDefault(l => l.Key == _settings.Le);
-            if (auto.Key != null) _langText.Text = "自动 → " + auto.Value;
-            else _langText.Text = Languages.First(l => l.Key == _settings.Le).Value;
+            string hover = parent == null ? "Hover" : "MenuHover";
+            string text = parent == null ? "Muted" : "Text";
+            var sourceText = new TextBlock();
+            var targetText = new TextBlock();
+            var source = LanguageChip(sourceText, true, hover, text);
+            var target = LanguageChip(targetText, true, hover, text);
+            var swapIcon = new TextBlock { Text = "", FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 12 };
+            var swap = LanguageChip(swapIcon, false, hover, "Muted");
+            swap.ToolTip = "互换";
+            swap.Margin = new Thickness(2, 0, 2, 0);
+
+            Action refresh = delegate
+            {
+                sourceText.Text = DictClient.NameOf(DictClient.SourceOf(_settings.Le));
+                targetText.Text = DictClient.NameOf(DictClient.TargetOf(_settings.Le));
+            };
+            refresh();
+            _languageChanged += refresh;
+            if (parent != null) parent.Closed += delegate { _languageChanged -= refresh; };
+
+            source.MouseLeftButtonUp += delegate { ShowLanguageChoices(parent, source, true); };
+            target.MouseLeftButtonUp += delegate { ShowLanguageChoices(parent, target, false); };
+            swap.MouseLeftButtonUp += delegate { SwapLanguages(); };
+
+            var panel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            panel.Children.Add(source);
+            panel.Children.Add(swap);
+            panel.Children.Add(target);
+            if (parent != null) panel.HorizontalAlignment = HorizontalAlignment.Center;
+            return panel;
         }
 
-        private void ShowLanguageMenu()
+        private static Border LanguageChip(TextBlock content, bool dropDown, string hover, string foreground)
         {
-            if (JustClosedBy(_lang)) return;
+            // 菜单是 Popup，不继承窗口的字体，要自己指定。
+            if (dropDown)
+            {
+                content.FontSize = 12;
+                content.FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI");
+            }
+            content.VerticalAlignment = VerticalAlignment.Center;
+            var inner = new StackPanel { Orientation = Orientation.Horizontal };
+            inner.Children.Add(content);
+            if (dropDown)
+                inner.Children.Add(new TextBlock { Text = "", FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 8, Margin = new Thickness(4, 1, 0, 0), VerticalAlignment = VerticalAlignment.Center });
+            inner.SetValue(TextElement.ForegroundProperty, Theme.Get(foreground));
+            var chip = new Border
+            {
+                Child = inner,
+                CornerRadius = new CornerRadius(5),
+                Padding = new Thickness(6, 3, 6, 3),
+                Background = Brushes.Transparent,
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            chip.MouseEnter += delegate
+            {
+                chip.Background = Theme.Get(hover);
+                inner.SetValue(TextElement.ForegroundProperty, Theme.Get("Text"));
+            };
+            chip.MouseLeave += delegate
+            {
+                chip.Background = Brushes.Transparent;
+                inner.SetValue(TextElement.ForegroundProperty, Theme.Get(foreground));
+            };
+            // 标题栏按下就开始拖动窗口，这里截住。
+            chip.MouseLeftButtonDown += (sender, e) => e.Handled = true;
+            return chip;
+        }
+
+        private void ShowLanguageChoices(IosMenu parent, FrameworkElement owner, bool isSource)
+        {
+            if (parent == null && JustClosedBy(owner)) return;
+            string current = isSource ? DictClient.SourceOf(_settings.Le) : DictClient.TargetOf(_settings.Le);
             var menu = new IosMenu(LanguageMenuWidth);
-            menu.AddChoiceColumns(new[]
+            if (isSource) menu.AddChoice(DictClient.NameOf(DictClient.Auto), current == DictClient.Auto, delegate { PickLanguage(true, DictClient.Auto); });
+            foreach (var language in DictClient.LanguageNames)
             {
-                new KeyValuePair<string, KeyValuePair<string, string>[]>("自动检测，译成", AutoTargets),
-                new KeyValuePair<string, KeyValuePair<string, string>[]>("指定语种", Languages),
-            }, _settings.Le, le =>
+                string value = language.Key;
+                menu.AddChoice(language.Value, value == current, delegate { PickLanguage(isSource, value); });
+            }
+            if (parent != null)
             {
-                _settings.Le = le;
-                _settings.Save();
-                UpdateLanguageLabel();
-                if (_target != null)
-                {
-                    _synced = null;
-                    SyncCompose();
-                }
-                else if (_input.Text.Trim().Length > 0) QueryInput();
-            });
-            OpenMenu(menu, _lang);
-            menu.OpenBelow(_lang, false);
+                parent.OpenChild(menu, owner);
+                return;
+            }
+            OpenMenu(menu, owner);
+            menu.OpenBelow(owner, false);
+        }
+
+        // 选成和另一边相同的语言时两边互换，和常见翻译软件一样。
+        private void PickLanguage(bool isSource, string value)
+        {
+            string source = DictClient.SourceOf(_settings.Le), target = DictClient.TargetOf(_settings.Le);
+            if (isSource)
+            {
+                if (value == target) target = source == DictClient.Auto ? (value == DictClient.Chinese ? "en" : DictClient.Chinese) : source;
+                source = value;
+            }
+            else
+            {
+                if (value == source) source = target;
+                target = value;
+            }
+            SetLanguages(source, target);
+        }
+
+        // 源语言是自动检测时没有确定的语种可换，改成“原目标语言 → 中文”（目标本来是中文就译成英文）。
+        private void SwapLanguages()
+        {
+            string source = DictClient.SourceOf(_settings.Le), target = DictClient.TargetOf(_settings.Le);
+            if (source == DictClient.Auto) SetLanguages(target, target == DictClient.Chinese ? "en" : DictClient.Chinese);
+            else SetLanguages(target, source);
+        }
+
+        private void SetLanguages(string source, string target)
+        {
+            string pair = DictClient.NormalizePair(DictClient.MakePair(source, target));
+            if (pair == _settings.Le) return;
+            _settings.Le = pair;
+            _settings.Save();
+            var handler = _languageChanged;
+            if (handler != null) handler();
+            if (!_window.IsVisible) return;
+            if (_target != null)
+            {
+                _synced = null;
+                SyncCompose();
+            }
+            else if (_input.Text.Trim().Length > 0) QueryInput();
         }
 
         private void ShowMoreMenu()
@@ -1029,8 +1121,9 @@ namespace DoubleCtrl
         {
             if (JustClosedBy(this)) return;
             var menu = new IosMenu(MenuWidth);
-            menu.AddAction("显示窗口", delegate { ShowForInput(null); });
+            menu.AddContent(BuildLanguagePair(menu));
             menu.AddGroupGap();
+            menu.AddAction("显示窗口", delegate { ShowForInput(null); });
             AddSettings(menu);
             OpenMenu(menu, this);
             menu.OpenAtMouse();

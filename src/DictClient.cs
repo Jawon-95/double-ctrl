@@ -75,37 +75,98 @@ namespace DoubleCtrl
         // 首次请求要走代理探测、TLS 握手和 JIT，提前做掉，第一次取词才不会卡。
         public static void WarmUp()
         {
-            QueryAsync("hello", "en").ContinueWith(t => Log.Write("warmup: " + (t.Exception == null ? "ok" : t.Exception.InnerException.Message)));
+            QueryAsync("hello", MakePair("en", Chinese)).ContinueWith(t => Log.Write("warmup: " + (t.Exception == null ? "ok" : t.Exception.InnerException.Message)));
         }
 
-        // 自动检测模式的 le 写成 auto>目标语言，比如 auto>zh。
-        public const string AutoPrefix = "auto>";
+        // 设置里的语言写成“源>目标”，比如 auto>zh、en>zh、zh>ja。旧版只存 le（如 en），按 en>zh 读。
+        public const string Auto = "auto";
         public const string Chinese = "zh";
+        private const char PairSeparator = '>';
 
-        public static bool IsAuto(string le)
+        public static readonly KeyValuePair<string, string>[] LanguageNames =
         {
-            return le != null && le.StartsWith(AutoPrefix, StringComparison.Ordinal);
+            new KeyValuePair<string, string>("zh", "中文"),
+            new KeyValuePair<string, string>("en", "英文"),
+            new KeyValuePair<string, string>("ja", "日文"),
+            new KeyValuePair<string, string>("ko", "韩文"),
+            new KeyValuePair<string, string>("fr", "法文"),
+            new KeyValuePair<string, string>("de", "德文"),
+            new KeyValuePair<string, string>("es", "西班牙文"),
+            new KeyValuePair<string, string>("ru", "俄文"),
+            new KeyValuePair<string, string>("pt", "葡萄牙文"),
+        };
+
+        public static string MakePair(string source, string target)
+        {
+            return source + PairSeparator + target;
         }
 
-        public static Task<DictResult> QueryAsync(string text, string selectedLe)
+        public static string NormalizePair(string pair)
         {
-            if (IsAuto(selectedLe)) return QueryAutoAsync(text, selectedLe.Substring(AutoPrefix.Length));
-            return QueryLeAsync(text, PickLe(text, selectedLe));
+            if (string.IsNullOrEmpty(pair)) return MakePair(Auto, Chinese);
+            string[] parts = pair.Split(PairSeparator);
+            string source = parts[0], target = parts.Length > 1 ? parts[1] : Chinese;
+            if (source != Auto && !IsKnown(source)) source = Auto;
+            if (!IsKnown(target)) target = Chinese;
+            if (source == target) target = source == Chinese ? "en" : Chinese;
+            return MakePair(source, target);
         }
 
-        // 有道的 le 只表示“某语言和中文互译”，le=auto 时接口自己识别语种：外文译成中文，中文译成英文。
+        public static string SourceOf(string pair)
+        {
+            return NormalizePair(pair).Split(PairSeparator)[0];
+        }
+
+        public static string TargetOf(string pair)
+        {
+            return NormalizePair(pair).Split(PairSeparator)[1];
+        }
+
+        public static string NameOf(string language)
+        {
+            if (language == Auto) return "自动检测";
+            return LanguageNames.First(l => l.Key == language).Value;
+        }
+
+        private static bool IsKnown(string language)
+        {
+            return LanguageNames.Any(l => l.Key == language);
+        }
+
+        // 有道的 le 只表示“某语言和中文互译”，同一个 le 两个方向都能查。
+        // 涉及中文的组合直接查；两种外文之间经中文中转。
+        public static Task<DictResult> QueryAsync(string text, string pair)
+        {
+            string source = SourceOf(pair), target = TargetOf(pair);
+            if (source == Auto) return QueryAutoAsync(text, target);
+            if (target == Chinese) return QueryLeAsync(text, PickLe(text, source));
+            if (source == Chinese || IsChinese(text)) return QueryLeAsync(text, target);
+            return QueryPivotAsync(text, PickLe(text, source), target);
+        }
+
+        // le=auto 时接口自己识别语种：外文译成中文，中文译成英文。
         // 中文原文直接按目标语言查；原文就是目标语言时退回译成中文；其他组合经中文中转。
         private static async Task<DictResult> QueryAutoAsync(string text, string target)
         {
             if (target != Chinese && IsChinese(text)) return await QueryLeAsync(text, target).ConfigureAwait(false);
             var result = await QueryLeAsync(text, "auto").ConfigureAwait(false);
             if (target == Chinese || result.Le == target || result.Le == Chinese) return result;
+            return await PivotAsync(text, result, target).ConfigureAwait(false);
+        }
 
-            string chinese = result.BestTranslation();
-            if (string.IsNullOrEmpty(chinese)) return result;
+        private static async Task<DictResult> QueryPivotAsync(string text, string source, string target)
+        {
+            var result = await QueryLeAsync(text, source).ConfigureAwait(false);
+            return await PivotAsync(text, result, target).ConfigureAwait(false);
+        }
+
+        private static async Task<DictResult> PivotAsync(string text, DictResult toChinese, string target)
+        {
+            string chinese = toChinese.BestTranslation();
+            if (string.IsNullOrEmpty(chinese)) return toChinese;
             var pivot = await QueryLeAsync(chinese, target).ConfigureAwait(false);
-            if (pivot.IsEmpty) return result;
-            Log.Write("auto pivot " + result.Le + " -> zh -> " + target);
+            if (pivot.IsEmpty) return toChinese;
+            Log.Write("pivot " + toChinese.Le + " -> zh -> " + target);
             // 中转结果的音标和拼音属于中间的中文，不是原文的，去掉。
             pivot.Query = text;
             pivot.Phonetics.Clear();

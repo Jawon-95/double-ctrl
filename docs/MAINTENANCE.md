@@ -225,6 +225,17 @@ curl -s "https://dict.youdao.com/jsonapi_s?doctype=json&jsonversion=4" --data "q
 
 下载 MP3 后用 MCI（`mciSendString`）播放。`mci error` 通常是系统缺解码器，可换 `MediaPlayer`。
 
+## 自动更新
+
+`src/Updater.cs`。启动 10 秒后、之后每 24 小时请求一次
+`https://api.github.com/repos/Jawon-95/double-ctrl/releases/latest`（不需要登录，每小时限 60 次），
+`tag_name`（如 `v1.3.0`）比当前版本新就下载名为 `DoubleCtrl.exe` 的附件，核对大小和文件版本号，
+等翻译窗口和菜单都关着时把自己改名为 `DoubleCtrl.exe.old`、换上新文件，带 `--updated` 启动新进程后退出。
+新进程等旧进程放开单实例互斥量再运行，并删掉 `.old`。日志关键字 `update`，安装失败记在 `crash.log`。
+
+**发布时必须**：tag 用 `v主.次.修订`，附件名是 `DoubleCtrl.exe`，`src/App.cs` 和 `assets/app.manifest` 的版本号与 tag 一致，
+否则客户端会因版本校验失败而不更新。**测试更新流程时不要拿 `bin` 里的 exe 改低版本号运行**，它会把自己换成线上版本。
+
 ## 构建
 
 `build.ps1` 用 `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe`，不需要安装 SDK，但只支持 C# 5：

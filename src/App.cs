@@ -11,8 +11,8 @@ using Application = System.Windows.Application;
 
 [assembly: AssemblyTitle("Double Ctrl")]
 [assembly: AssemblyProduct("Double Ctrl")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
 
 namespace DoubleCtrl
 {
@@ -21,6 +21,9 @@ namespace DoubleCtrl
         private const string MutexName = "DoubleCtrl.SingleInstance";
         private const string ShowEventName = "DoubleCtrl.Show";
         private const string QuitEventName = "DoubleCtrl.Quit";
+        private static readonly TimeSpan UpdateDelay = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan UpdateInterval = TimeSpan.FromHours(24);
+        private static readonly TimeSpan InstallRetry = TimeSpan.FromSeconds(30);
 
         private readonly Application _app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         private readonly Settings _settings = Settings.Load();
@@ -30,6 +33,7 @@ namespace DoubleCtrl
         private NotifyIcon _tray;
         private int _capturing;
         private Native.POINT _lastAnchor;
+        private string _downloadedUpdate;
 
         private App()
         {
@@ -42,17 +46,26 @@ namespace DoubleCtrl
             Log.Enabled = args.Contains("--debug");
             SelectionReader.ClipboardDisabled = args.Contains("--no-clipboard");
             bool created;
+            bool updated = args.Contains(Updater.UpdatedArgument);
             using (var mutex = new Mutex(true, MutexName, out created))
             {
+                // 自动更新后启动的新进程：旧进程正在退出，等它放开互斥量。
+                if (!created && updated) created = WaitForMutex(mutex);
                 if (!created)
                 {
                     SignalRunningInstance(args);
                     return;
                 }
                 if (args.Contains("--quit")) return;
-                new App().Run(args.Contains(AutoStart.Argument));
+                new App().Run(args.Contains(AutoStart.Argument), updated);
                 GC.KeepAlive(mutex);
             }
+        }
+
+        private static bool WaitForMutex(Mutex mutex)
+        {
+            try { return mutex.WaitOne(TimeSpan.FromSeconds(15)); }
+            catch (AbandonedMutexException) { return true; }
         }
 
         private static void SignalRunningInstance(string[] args)
@@ -63,7 +76,7 @@ namespace DoubleCtrl
                 signal.Set();
         }
 
-        private void Run(bool autostart)
+        private void Run(bool autostart, bool updated)
         {
             // 常驻后台的工具不该因为一处界面异常就整个退出，记下来继续运行。
             _app.DispatcherUnhandledException += (sender, e) =>
@@ -74,6 +87,7 @@ namespace DoubleCtrl
             AppDomain.CurrentDomain.UnhandledException += (sender, e) => Log.Crash(e.ExceptionObject);
 
             AutoStart.Refresh();
+            Updater.CleanUp();
             SelectionReader.WarmUp();
             DictClient.WarmUp();
 
@@ -95,8 +109,10 @@ namespace DoubleCtrl
             WatchSignal(ShowEventName, delegate { _popup.ShowForInput(null); });
             WatchSignal(QuitEventName, Exit);
 
-            if (autostart || _settings.StartHidden) ShowFirstRunBalloon();
+            if (updated) _tray.ShowBalloonTip(4000, "Double Ctrl 已更新到 " + Updater.CurrentText, "选中文字后双击 Ctrl 即可翻译。", ToolTipIcon.Info);
+            else if (autostart || _settings.StartHidden) ShowFirstRunBalloon();
             else OnUi(delegate { _popup.ShowForInput(null); });
+            StartUpdateChecks();
 
             _app.Run();
         }
@@ -114,6 +130,44 @@ namespace DoubleCtrl
                 if (e.Button == MouseButtons.Left) _popup.ShowForInput(null);
                 else if (e.Button == MouseButtons.Right) _popup.ShowTrayMenu();
             };
+        }
+
+        // 启动后稍等再查，不和预热抢网络；常驻后台的程序很少重启，之后每天再查一次。
+        private void StartUpdateChecks()
+        {
+            var timer = new System.Windows.Threading.DispatcherTimer { Interval = UpdateDelay };
+            timer.Tick += delegate
+            {
+                timer.Interval = UpdateInterval;
+                CheckForUpdate();
+            };
+            timer.Start();
+        }
+
+        private async void CheckForUpdate()
+        {
+            if (_downloadedUpdate != null) return;
+            try { _downloadedUpdate = await Updater.DownloadAsync(); }
+            catch (Exception e) { Log.Write("update check failed: " + e.Message); }
+            if (_downloadedUpdate != null) TryInstallUpdate();
+        }
+
+        // 用户正在看翻译或开着菜单时不重启，过一会儿再试。
+        private void TryInstallUpdate()
+        {
+            if (_popup.IsVisible || _popup.IsMenuOpen)
+            {
+                var retry = new System.Windows.Threading.DispatcherTimer { Interval = InstallRetry };
+                retry.Tick += delegate
+                {
+                    retry.Stop();
+                    TryInstallUpdate();
+                };
+                retry.Start();
+                return;
+            }
+            Log.Write("installing update " + _downloadedUpdate);
+            if (Updater.Install(_downloadedUpdate)) Exit();
         }
 
         private static Icon LoadTrayIcon()

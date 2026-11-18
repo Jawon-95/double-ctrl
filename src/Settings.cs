@@ -44,7 +44,7 @@ namespace DoubleCtrl
 
         private Settings Normalized()
         {
-            if (string.IsNullOrEmpty(Le)) Le = "en";
+            Le = DictClient.NormalizePair(Le);
             if (string.IsNullOrEmpty(Theme)) Theme = DoubleCtrl.Theme.System;
             return this;
         }

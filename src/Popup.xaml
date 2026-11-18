@@ -125,13 +125,8 @@
           <Button x:Name="CloseButton" Style="{StaticResource IconButton}" Margin="4,0,0,0" Content="&#xE8BB;" FontSize="11" ToolTip="关闭"/>
         </StackPanel>
         <Image x:Name="AppIcon" Width="18" Height="18" Margin="0,0,7,0" VerticalAlignment="Center" RenderOptions.BitmapScalingMode="HighQuality"/>
-        <TextBlock Text="Double Ctrl" Foreground="{DynamicResource Text}" FontWeight="SemiBold" FontSize="13" VerticalAlignment="Center"/>
-        <Button x:Name="LangButton" Style="{StaticResource TextButton}" Margin="6,0,0,0" HorizontalAlignment="Left">
-          <StackPanel Orientation="Horizontal">
-            <TextBlock x:Name="LangText" VerticalAlignment="Center"/>
-            <TextBlock Text="&#xE70D;" FontFamily="{StaticResource Icons}" FontSize="8" Margin="4,1,0,0" VerticalAlignment="Center"/>
-          </StackPanel>
-        </Button>
+        <!-- 源语言 ⇄ 目标语言，内容由代码生成，菜单里也用同一个控件。 -->
+        <ContentControl x:Name="LangHost" Margin="2,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Focusable="False"/>
       </DockPanel>
     </Grid>
     <StackPanel x:Name="Body" Grid.Row="1" Margin="0,6,0,0">

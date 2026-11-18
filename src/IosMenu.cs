@@ -30,6 +30,9 @@ namespace DoubleCtrl
         private readonly StackPanel _rows = new StackPanel();
         private readonly List<Border> _items = new List<Border>();
         private readonly double _width;
+        private IosMenu _child;
+        private object _lastChildOwner;
+        private int _childClosedTick;
 
         public event Action Closed;
 
@@ -75,49 +78,6 @@ namespace DoubleCtrl
                 Close();
                 onClick();
             });
-        }
-
-        // 分栏单选：每栏是（标题，选项列表），选项是（值，文字）。选项多时并排放，菜单不会太长。
-        public void AddChoiceColumns(KeyValuePair<string, KeyValuePair<string, string>[]>[] columns, string selected, Action<string> onSelect)
-        {
-            var grid = new Grid();
-            int longest = columns.Max(c => c.Value.Length);
-            double inner = Radius - 1;
-            for (int i = 0; i < columns.Length; i++)
-            {
-                if (i > 0)
-                {
-                    grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                    var divider = new Border { Width = 1 };
-                    Paint(divider, Border.BackgroundProperty, "MenuLine");
-                    Grid.SetColumn(divider, grid.ColumnDefinitions.Count - 1);
-                    grid.Children.Add(divider);
-                }
-                grid.ColumnDefinitions.Add(new ColumnDefinition());
-
-                var column = new StackPanel();
-                var header = new TextBlock { Text = columns[i].Key, FontFamily = UiFont, FontSize = 11, Margin = new Thickness(12, 8, 10, 4) };
-                Paint(header, TextBlock.ForegroundProperty, "Muted");
-                column.Children.Add(header);
-                var options = columns[i].Value;
-                for (int j = 0; j < options.Length; j++)
-                {
-                    string value = options[j].Key;
-                    if (j > 0) column.Children.Add(Separator());
-                    var row = BuildRow(options[j].Value, "Text", value == selected ? CheckMark() : null, delegate
-                    {
-                        Close();
-                        onSelect(value);
-                    });
-                    // 贴着面板底边的行，高亮背景要贴合圆角。
-                    if (j == options.Length - 1 && options.Length == longest)
-                        row.CornerRadius = new CornerRadius(0, 0, i == columns.Length - 1 ? inner : 0, i == 0 ? inner : 0);
-                    column.Children.Add(row);
-                }
-                Grid.SetColumn(column, grid.ColumnDefinitions.Count - 1);
-                grid.Children.Add(column);
-            }
-            _rows.Children.Add(grid);
         }
 
         private static TextBlock CheckMark()
@@ -197,6 +157,46 @@ namespace DoubleCtrl
             row.Cursor = Cursors.Arrow;
         }
 
+        // 自定义内容的行：内容自己处理点击，行本身没有高亮。
+        public void AddContent(FrameworkElement content)
+        {
+            var row = new Border { Height = RowHeight + 4, Padding = new Thickness(6, 0, 6, 0), Background = Brushes.Transparent, Child = content };
+            AddItem(row);
+        }
+
+        // 子菜单：贴着菜单里的某个元素弹出，父菜单保持打开。
+        public void OpenChild(IosMenu child, FrameworkElement owner)
+        {
+            // 子菜单开着时再点同一个元素：全局鼠标事件已先把它关掉，这里不能又打开。
+            if (owner == _lastChildOwner && Environment.TickCount - _childClosedTick < 300) return;
+            CloseChild();
+            _child = child;
+            child.Closed += delegate
+            {
+                if (_child != child) return;
+                _child = null;
+                _lastChildOwner = owner;
+                _childClosedTick = Environment.TickCount;
+            };
+            child.OpenBelow(owner, false);
+        }
+
+        // 全局鼠标按下：点在子菜单外先关子菜单。返回 true 表示点在菜单里，菜单不用关。
+        public bool HandleMouseDown()
+        {
+            if (_child != null)
+            {
+                if (_child.ContainsCursor()) return true;
+                CloseChild();
+            }
+            return ContainsCursor();
+        }
+
+        private void CloseChild()
+        {
+            if (_child != null) _child.Close();
+        }
+
         public void AddGroupGap()
         {
             var gap = new Border { Height = 5 };
@@ -221,6 +221,7 @@ namespace DoubleCtrl
 
         public void Close()
         {
+            CloseChild();
             _popup.IsOpen = false;
         }
 
@@ -236,14 +237,18 @@ namespace DoubleCtrl
 
         private Border AddRow(string text, string foreground, FrameworkElement trailing, Action onClick)
         {
+            var row = BuildRow(text, foreground, trailing, onClick);
+            AddItem(row);
+            return row;
+        }
+
+        private void AddItem(Border row)
+        {
             if (_rows.Children.Count > 0 && _rows.Children[_rows.Children.Count - 1] is Border
                 && _items.Contains((Border)_rows.Children[_rows.Children.Count - 1]))
                 _rows.Children.Add(Separator());
-
-            var row = BuildRow(text, foreground, trailing, onClick);
             _items.Add(row);
             _rows.Children.Add(row);
-            return row;
         }
 
         private static Border Separator()
