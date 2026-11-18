@@ -70,24 +70,68 @@ namespace DoubleCtrl
         // 单选项：对勾放在行尾，选中后关闭菜单。
         public void AddChoice(string text, bool selected, Action onClick)
         {
-            TextBlock mark = null;
-            if (selected)
-            {
-                mark = new TextBlock
-                {
-                    Text = "",
-                    FontFamily = new FontFamily("Segoe MDL2 Assets"),
-                    FontSize = 11,
-                    FontWeight = FontWeights.Bold,
-                    VerticalAlignment = VerticalAlignment.Center,
-                };
-                Paint(mark, TextBlock.ForegroundProperty, "Accent");
-            }
-            AddRow(text, "Text", mark, delegate
+            AddRow(text, "Text", selected ? CheckMark() : null, delegate
             {
                 Close();
                 onClick();
             });
+        }
+
+        // 分栏单选：每栏是（标题，选项列表），选项是（值，文字）。选项多时并排放，菜单不会太长。
+        public void AddChoiceColumns(KeyValuePair<string, KeyValuePair<string, string>[]>[] columns, string selected, Action<string> onSelect)
+        {
+            var grid = new Grid();
+            int longest = columns.Max(c => c.Value.Length);
+            double inner = Radius - 1;
+            for (int i = 0; i < columns.Length; i++)
+            {
+                if (i > 0)
+                {
+                    grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    var divider = new Border { Width = 1 };
+                    Paint(divider, Border.BackgroundProperty, "MenuLine");
+                    Grid.SetColumn(divider, grid.ColumnDefinitions.Count - 1);
+                    grid.Children.Add(divider);
+                }
+                grid.ColumnDefinitions.Add(new ColumnDefinition());
+
+                var column = new StackPanel();
+                var header = new TextBlock { Text = columns[i].Key, FontFamily = UiFont, FontSize = 11, Margin = new Thickness(12, 8, 10, 4) };
+                Paint(header, TextBlock.ForegroundProperty, "Muted");
+                column.Children.Add(header);
+                var options = columns[i].Value;
+                for (int j = 0; j < options.Length; j++)
+                {
+                    string value = options[j].Key;
+                    if (j > 0) column.Children.Add(Separator());
+                    var row = BuildRow(options[j].Value, "Text", value == selected ? CheckMark() : null, delegate
+                    {
+                        Close();
+                        onSelect(value);
+                    });
+                    // 贴着面板底边的行，高亮背景要贴合圆角。
+                    if (j == options.Length - 1 && options.Length == longest)
+                        row.CornerRadius = new CornerRadius(0, 0, i == columns.Length - 1 ? inner : 0, i == 0 ? inner : 0);
+                    column.Children.Add(row);
+                }
+                Grid.SetColumn(column, grid.ColumnDefinitions.Count - 1);
+                grid.Children.Add(column);
+            }
+            _rows.Children.Add(grid);
+        }
+
+        private static TextBlock CheckMark()
+        {
+            var mark = new TextBlock
+            {
+                Text = "",
+                FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                FontSize = 11,
+                FontWeight = FontWeights.Bold,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            Paint(mark, TextBlock.ForegroundProperty, "Accent");
+            return mark;
         }
 
         // 开关项：切换后菜单保持打开，和 iOS 设置页一样可以连续操作。
@@ -194,12 +238,23 @@ namespace DoubleCtrl
         {
             if (_rows.Children.Count > 0 && _rows.Children[_rows.Children.Count - 1] is Border
                 && _items.Contains((Border)_rows.Children[_rows.Children.Count - 1]))
-            {
-                var line = new Border { Height = 1, Margin = new Thickness(12, 0, 0, 0) };
-                Paint(line, Border.BackgroundProperty, "MenuLine");
-                _rows.Children.Add(line);
-            }
+                _rows.Children.Add(Separator());
 
+            var row = BuildRow(text, foreground, trailing, onClick);
+            _items.Add(row);
+            _rows.Children.Add(row);
+            return row;
+        }
+
+        private static Border Separator()
+        {
+            var line = new Border { Height = 1, Margin = new Thickness(12, 0, 0, 0) };
+            Paint(line, Border.BackgroundProperty, "MenuLine");
+            return line;
+        }
+
+        private static Border BuildRow(string text, string foreground, FrameworkElement trailing, Action onClick)
+        {
             var content = new DockPanel { LastChildFill = true };
             if (trailing != null)
             {
@@ -217,8 +272,6 @@ namespace DoubleCtrl
                 row.MouseLeave += delegate { row.Background = Brushes.Transparent; };
                 row.MouseLeftButtonUp += delegate { onClick(); };
             }
-            _items.Add(row);
-            _rows.Children.Add(row);
             return row;
         }
 

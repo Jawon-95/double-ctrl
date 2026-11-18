@@ -30,6 +30,7 @@ namespace DoubleCtrl
         private const double NonResultsHeight = 170;
         private const double MenuReopenGuardMs = 300;
         private const double MenuWidth = 176;
+        private const double LanguageMenuWidth = 232;
         private const double CollapsedScale = 0.72;
         private const int TypingDelayMs = 450;
         private const int ComposeDelayMs = 500; // 输入翻译要等用户停下来，太快会边打字边改原输入框
@@ -45,6 +46,7 @@ namespace DoubleCtrl
         private const double ComposePreferredSpace = 260; // 上方有这么多空间就优先放在原输入框上面
         private const double ComposeMinCardWidth = 320;
         private const double ComposeMaxCardWidth = 600;
+        private const double ComposeMouseOffset = 24; // 原输入框很宽时，卡片左边缘放在鼠标左侧这么远
         private const double DefaultWidth = 344;
         private const double DefaultInputMaxHeight = 92;
         private static readonly TimeSpan OpenDuration = TimeSpan.FromMilliseconds(200);
@@ -60,6 +62,20 @@ namespace DoubleCtrl
             new KeyValuePair<string, string>("es", "西汉互译"),
             new KeyValuePair<string, string>("ru", "俄汉互译"),
             new KeyValuePair<string, string>("pt", "葡汉互译"),
+        };
+
+        // 自动检测原文语种，译成选定的语言。
+        private static readonly KeyValuePair<string, string>[] AutoTargets =
+        {
+            new KeyValuePair<string, string>(DictClient.AutoPrefix + "zh", "中文"),
+            new KeyValuePair<string, string>(DictClient.AutoPrefix + "en", "英文"),
+            new KeyValuePair<string, string>(DictClient.AutoPrefix + "ja", "日文"),
+            new KeyValuePair<string, string>(DictClient.AutoPrefix + "ko", "韩文"),
+            new KeyValuePair<string, string>(DictClient.AutoPrefix + "fr", "法文"),
+            new KeyValuePair<string, string>(DictClient.AutoPrefix + "de", "德文"),
+            new KeyValuePair<string, string>(DictClient.AutoPrefix + "es", "西班牙文"),
+            new KeyValuePair<string, string>(DictClient.AutoPrefix + "ru", "俄文"),
+            new KeyValuePair<string, string>(DictClient.AutoPrefix + "pt", "葡萄牙文"),
         };
 
         private static readonly KeyValuePair<string, string>[] ThemeOptions =
@@ -85,7 +101,7 @@ namespace DoubleCtrl
 
         private bool _pinned, _settingText, _hovering, _inputMode, _growUp, _closing;
         private bool _syncing, _syncPending, _focusAway, _composing;
-        private int _composeTick;
+        private int _composeTick, _composeMouseX;
         private IosMenu _menu;
         private object _menuOwner, _lastMenuOwner;
         private int _menuClosedTick;
@@ -233,6 +249,9 @@ namespace DoubleCtrl
             _details.Visibility = Visibility.Collapsed;
             UpdateTitleBar();
             _window.UpdateLayout();
+            Native.POINT cursor;
+            Native.GetCursorPos(out cursor);
+            _composeMouseX = cursor.X;
             PlaceAtTarget();
             _window.ShowActivated = false;
             Reveal();
@@ -290,12 +309,18 @@ namespace DoubleCtrl
                 CloseMenu();
             }
             if (!_window.IsVisible || _closing || _pinned) return;
+            if (!CardContainsCursor()) Hide();
+        }
+
+        // 按看得见的卡片判断，窗口四周的阴影和卡片上方透明的标题栏预留区都算外面。
+        private bool CardContainsCursor()
+        {
+            if (PresentationSource.FromVisual(_card) == null) return false;
+            var topLeft = _card.PointToScreen(new Point(0, 0));
+            var bottomRight = _card.PointToScreen(new Point(_card.ActualWidth, _card.ActualHeight));
             Native.POINT cursor;
-            Native.RECT rect;
             Native.GetCursorPos(out cursor);
-            Native.GetWindowRect(_hwnd, out rect);
-            if (cursor.X < rect.Left || cursor.X >= rect.Right || cursor.Y < rect.Top || cursor.Y >= rect.Bottom)
-                Hide();
+            return cursor.X >= topLeft.X && cursor.X < bottomRight.X && cursor.Y >= topLeft.Y && cursor.Y < bottomRight.Y;
         }
 
         public void OnGlobalEscape()
@@ -628,7 +653,13 @@ namespace DoubleCtrl
             int above = top - work.Top, below = work.Bottom - bottom;
             _growUp = above >= ComposePreferredSpace * scale || above >= below;
 
-            int x = Math.Max(work.Left, Math.Min(bounds.Left, work.Right));
+            // 原输入框比卡片宽时，卡片跟着弹出时的鼠标走，但不超出原输入框的左右边界。
+            double scaleX = VisualTreeHelper.GetDpi(_window).DpiScaleX;
+            int card = (int)((_window.Width - 2 * ShadowMargin) * scaleX);
+            int x = bounds.Left;
+            if (bounds.Right - bounds.Left > card)
+                x = Math.Max(bounds.Left, Math.Min(_composeMouseX - (int)(ComposeMouseOffset * scaleX), bounds.Right - card));
+            x = Math.Max(work.Left, Math.Min(x, work.Right));
             _anchor = new Native.POINT { X = x, Y = _growUp ? top : bottom };
             double space = (_growUp ? above : below) / scale;
             _input.MaxHeight = Math.Max(ComposeMinInputHeight, space - ComposeChromeHeight);
@@ -707,7 +738,7 @@ namespace DoubleCtrl
                 if (text.Length > 0)
                 {
                     var result = await DictClient.QueryAsync(text, _settings.Le);
-                    translated = PickTranslation(result);
+                    translated = result.BestTranslation();
                     if (target != _target) return;
                     if (translated == null)
                     {
@@ -787,18 +818,6 @@ namespace DoubleCtrl
             target.Bounds = now;
             Log.Write("compose target moved " + now.Left + "," + now.Top + "," + now.Right + "," + now.Bottom);
             PlaceAtTarget();
-        }
-
-        // 句子用整句译文；单词取第一个释义里的第一项，原输入框里只需要一个词。
-        private static string PickTranslation(DictResult result)
-        {
-            if (!string.IsNullOrEmpty(result.Sentence)) return result.Sentence;
-            var word = result.Entries.FirstOrDefault(e => e.IsWord);
-            if (word != null) return word.Text;
-            var entry = result.Entries.FirstOrDefault();
-            string text = entry != null ? entry.Text : result.Web.FirstOrDefault();
-            if (string.IsNullOrEmpty(text)) return null;
-            return text.Split(new[] { '；', ';', '，', ',' }, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
         }
 
         private void ShowWriteFailure(string translated)
@@ -961,34 +980,38 @@ namespace DoubleCtrl
         {
             string query = _current != null ? _current.Query : _input.Text.Trim();
             string le = _current != null ? _current.Le : _settings.Le;
+            if (DictClient.IsAuto(le)) le = le.Substring(DictClient.AutoPrefix.Length);
+            if (le == DictClient.Chinese) le = "en"; // 网页版没有 lang=zh，中文词按中英查
             Process.Start("https://dict.youdao.com/result?word=" + Uri.EscapeDataString(query) + "&lang=" + le);
         }
 
         private void UpdateLanguageLabel()
         {
-            _langText.Text = Languages.First(l => l.Key == _settings.Le).Value;
+            var auto = AutoTargets.FirstOrDefault(l => l.Key == _settings.Le);
+            if (auto.Key != null) _langText.Text = "自动 → " + auto.Value;
+            else _langText.Text = Languages.First(l => l.Key == _settings.Le).Value;
         }
 
         private void ShowLanguageMenu()
         {
             if (JustClosedBy(_lang)) return;
-            var menu = new IosMenu(116);
-            foreach (var item in Languages)
+            var menu = new IosMenu(LanguageMenuWidth);
+            menu.AddChoiceColumns(new[]
             {
-                var language = item;
-                menu.AddChoice(language.Value, language.Key == _settings.Le, delegate
+                new KeyValuePair<string, KeyValuePair<string, string>[]>("自动检测，译成", AutoTargets),
+                new KeyValuePair<string, KeyValuePair<string, string>[]>("指定语种", Languages),
+            }, _settings.Le, le =>
+            {
+                _settings.Le = le;
+                _settings.Save();
+                UpdateLanguageLabel();
+                if (_target != null)
                 {
-                    _settings.Le = language.Key;
-                    _settings.Save();
-                    UpdateLanguageLabel();
-                    if (_target != null)
-                    {
-                        _synced = null;
-                        SyncCompose();
-                    }
-                    else if (_input.Text.Trim().Length > 0) QueryInput();
-                });
-            }
+                    _synced = null;
+                    SyncCompose();
+                }
+                else if (_input.Text.Trim().Length > 0) QueryInput();
+            });
             OpenMenu(menu, _lang);
             menu.OpenBelow(_lang, false);
         }

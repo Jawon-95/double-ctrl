@@ -36,6 +36,18 @@ namespace DoubleCtrl
         {
             get { return Sentence == null && Entries.Count == 0 && Web.Count == 0; }
         }
+
+        // 句子用整句译文；单词取第一个释义里的第一项，输入翻译和中转翻译只需要一个词。
+        public string BestTranslation()
+        {
+            if (!string.IsNullOrEmpty(Sentence)) return Sentence;
+            var word = Entries.FirstOrDefault(e => e.IsWord);
+            if (word != null) return word.Text;
+            var entry = Entries.FirstOrDefault();
+            string text = entry != null ? entry.Text : Web.FirstOrDefault();
+            if (string.IsNullOrEmpty(text)) return null;
+            return text.Split(new[] { '；', ';', '，', ',' }, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+        }
     }
 
     internal static class DictClient
@@ -66,9 +78,55 @@ namespace DoubleCtrl
             QueryAsync("hello", "en").ContinueWith(t => Log.Write("warmup: " + (t.Exception == null ? "ok" : t.Exception.InnerException.Message)));
         }
 
-        public static async Task<DictResult> QueryAsync(string text, string selectedLe)
+        // 自动检测模式的 le 写成 auto>目标语言，比如 auto>zh。
+        public const string AutoPrefix = "auto>";
+        public const string Chinese = "zh";
+
+        public static bool IsAuto(string le)
         {
-            string le = PickLe(text, selectedLe);
+            return le != null && le.StartsWith(AutoPrefix, StringComparison.Ordinal);
+        }
+
+        public static Task<DictResult> QueryAsync(string text, string selectedLe)
+        {
+            if (IsAuto(selectedLe)) return QueryAutoAsync(text, selectedLe.Substring(AutoPrefix.Length));
+            return QueryLeAsync(text, PickLe(text, selectedLe));
+        }
+
+        // 有道的 le 只表示“某语言和中文互译”，le=auto 时接口自己识别语种：外文译成中文，中文译成英文。
+        // 中文原文直接按目标语言查；原文就是目标语言时退回译成中文；其他组合经中文中转。
+        private static async Task<DictResult> QueryAutoAsync(string text, string target)
+        {
+            if (target != Chinese && IsChinese(text)) return await QueryLeAsync(text, target).ConfigureAwait(false);
+            var result = await QueryLeAsync(text, "auto").ConfigureAwait(false);
+            if (target == Chinese || result.Le == target || result.Le == Chinese) return result;
+
+            string chinese = result.BestTranslation();
+            if (string.IsNullOrEmpty(chinese)) return result;
+            var pivot = await QueryLeAsync(chinese, target).ConfigureAwait(false);
+            if (pivot.IsEmpty) return result;
+            Log.Write("auto pivot " + result.Le + " -> zh -> " + target);
+            // 中转结果的音标和拼音属于中间的中文，不是原文的，去掉。
+            pivot.Query = text;
+            pivot.Phonetics.Clear();
+            pivot.Forms.Clear();
+            return pivot;
+        }
+
+        // 含汉字且没有假名、谚文就当作中文。只有汉字的日文短语会被误判，概率很小。
+        private static bool IsChinese(string text)
+        {
+            bool han = false;
+            foreach (char c in text)
+            {
+                if ((c >= '぀' && c <= 'ヿ') || (c >= '가' && c <= '힣')) return false;
+                if (c >= '一' && c <= '鿿') han = true;
+            }
+            return han;
+        }
+
+        private static async Task<DictResult> QueryLeAsync(string text, string le)
+        {
             var form = new StringBuilder();
             form.Append("q=").Append(Uri.EscapeDataString(text));
             form.Append("&le=").Append(le);
@@ -83,7 +141,16 @@ namespace DoubleCtrl
             response.EnsureSuccessStatusCode();
             string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-            var result = Parse(text, le, serializer.DeserializeObject(json));
+            var root = serializer.DeserializeObject(json);
+            // le=auto 时以接口识别出的语种为准，“更多释义”等要用到。
+            if (le == "auto")
+            {
+                le = Str(root, "le");
+                // 中文原文接口会给 le=en，按识别出的语种记成中文，调用方据此判断原文语种。
+                if (Str(Get(root, "meta"), "guessLanguage") == Chinese) le = Chinese;
+                if (le.Length == 0) le = "en";
+            }
+            var result = Parse(text, le, root);
             // 接口改版时最先出现的症状就是解析不出内容，留下原始响应方便排查。
             if (result.IsEmpty) Log.Write("empty result, raw: " + json.Substring(0, Math.Min(json.Length, 800)));
             return result;

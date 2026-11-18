@@ -11,8 +11,8 @@ using Application = System.Windows.Application;
 
 [assembly: AssemblyTitle("Double Ctrl")]
 [assembly: AssemblyProduct("Double Ctrl")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 namespace DoubleCtrl
 {
