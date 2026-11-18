@@ -25,6 +25,8 @@ namespace DoubleCtrl
         private const int FocusTimeoutMs = 150;
         private const int FocusSettleMs = 60; // 读不到内容时只能按经验等焦点落定
         private const int SelectTimeoutMs = 150; // Chromium 的无障碍选区动作是异步生效的
+        private const int SelectStableMs = 50; // ProseMirror 获得焦点 20ms 后会恢复自己的选区
+        private const int SelectAttempts = 3;
         private const int VerifyTimeoutMs = 600;
         private const int PasteSettleMs = 300; // 读不到内容时无法确认目标程序何时读完剪贴板，只能多等
 
@@ -294,7 +296,7 @@ namespace DoubleCtrl
                     Log.Write("input target: paste deferred, user typing");
                     return null;
                 }
-                _monitor.SuppressInjected(ForegroundTimeoutMs + FocusTimeoutMs + SelectTimeoutMs + VerifyTimeoutMs);
+                _monitor.SuppressInjected(ForegroundTimeoutMs + FocusTimeoutMs + SelectAttempts * (SelectTimeoutMs + SelectStableMs) + VerifyTimeoutMs);
                 var watch = System.Diagnostics.Stopwatch.StartNew();
                 bool written = WritePasteCore(text);
                 Log.Write("input target: paste written=" + written + " ms=" + watch.ElapsedMilliseconds);
@@ -333,7 +335,9 @@ namespace DoubleCtrl
                 if (present)
                 {
                     replace = true;
-                    if (before == null || !SelectInserted()) AddSelectLeft(inputs, new StringInfo(_inserted).LengthInTextElements);
+                    if (before == null || _text == null) AddSelectLeft(inputs, new StringInfo(_inserted).LengthInTextElements);
+                    // 选不中就不能发按键：粘贴会插在光标处让内容越积越多，Delete 会删掉用户自己的字。
+                    else if (!SelectInserted()) return false;
                 }
             }
 
@@ -407,36 +411,50 @@ namespace DoubleCtrl
             return Uia(() => _text != null ? _text.DocumentRange.GetText(-1) : _valueReader.Current.Value ?? "", null);
         }
 
-        // 在光标前找上次的译文并选中，避免选到前面碰巧相同的文字。选区生效后才返回。
+        // 在光标前找上次的译文并选中，避免选到前面碰巧相同的文字。选区生效并稳定后才返回 true。
+        // 网页编辑器（如 Codex 用的 ProseMirror）获得焦点后会异步把它记住的光标写回页面，
+        // 刚设好的选区可能被冲掉，所以选中后还要确认保持一小段时间，被冲掉就重选。
         private bool SelectInserted()
         {
             if (_text == null) return false;
             string want = Collapse(_inserted);
-            return Uia(() =>
+            bool selected = Uia(() =>
             {
-                var document = _text.DocumentRange;
-                TextPatternRange found = null;
-                var selection = _text.GetSelection();
-                if (selection.Length > 0)
+                for (int attempt = 0; attempt < SelectAttempts; attempt++)
                 {
-                    var head = document.Clone();
-                    head.MoveEndpointByRange(TextPatternRangeEndpoint.End, selection[0], TextPatternRangeEndpoint.End);
-                    found = head.FindText(_inserted, true, false);
+                    var document = _text.DocumentRange;
+                    TextPatternRange found = null;
+                    var selection = _text.GetSelection();
+                    if (selection.Length > 0)
+                    {
+                        var head = document.Clone();
+                        head.MoveEndpointByRange(TextPatternRangeEndpoint.End, selection[0], TextPatternRangeEndpoint.End);
+                        found = head.FindText(_inserted, true, false);
+                    }
+                    if (found == null) found = document.FindText(_inserted, true, false);
+                    if (found == null) return false;
+                    found.Select();
+                    if (WaitSelection(want, SelectTimeoutMs, true) && WaitSelection(want, SelectStableMs, false)) return true;
+                    Log.Write("input target: selection lost, attempt=" + (attempt + 1));
                 }
-                if (found == null) found = document.FindText(_inserted, true, false);
-                if (found == null) return false;
-                found.Select();
-                int start = Environment.TickCount;
-                while (Environment.TickCount - start < SelectTimeoutMs)
-                {
-                    var now = _text.GetSelection();
-                    if (now.Length > 0 && Collapse(now[0].GetText(-1)) == want) return true;
-                    Thread.Sleep(1);
-                }
-                // 已经发出选区动作，再按字数 Shift+← 会和它叠加，只能按已选中处理。
-                Log.Write("input target: selection not confirmed");
-                return true;
-            }, false);
+                return false;
+            }, false, SelectAttempts * (SelectTimeoutMs + SelectStableMs) + UiaTimeoutMs);
+            if (!selected) Log.Write("input target: selection not confirmed");
+            return selected;
+        }
+
+        // appear=true：等选区变成 want；appear=false：确认选区在这段时间里一直是 want。
+        private bool WaitSelection(string want, int timeoutMs, bool appear)
+        {
+            int start = Environment.TickCount;
+            while (true)
+            {
+                var now = _text.GetSelection();
+                bool match = now.Length > 0 && Collapse(now[0].GetText(-1)) == want;
+                if (match == appear) return appear;
+                if (Environment.TickCount - start >= timeoutMs) return !appear;
+                Thread.Sleep(1);
+            }
         }
 
         private bool WaitForChange(string before, string text)
@@ -483,10 +501,10 @@ namespace DoubleCtrl
         }
 
         // UIA 跨进程调用，目标程序卡住时不能把写入线程一起拖住。
-        private static T Uia<T>(Func<T> call, T fallback)
+        private static T Uia<T>(Func<T> call, T fallback, int timeoutMs = UiaTimeoutMs)
         {
             var task = Task.Run(call);
-            try { return task.Wait(UiaTimeoutMs) ? task.Result : fallback; }
+            try { return task.Wait(timeoutMs) ? task.Result : fallback; }
             catch (AggregateException e)
             {
                 Log.Write("input target uia: " + e.InnerException.Message);

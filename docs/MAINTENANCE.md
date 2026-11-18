@@ -154,6 +154,10 @@ curl -s "https://dict.youdao.com/jsonapi_s?doctype=json&jsonversion=4" --data "q
        上次的译文还在就用 `TextPattern.FindText` 在光标前找到它，`Select()` 选中并等选区生效；
        已经不在了（用户删改过）就在光标处插入。读不到内容的控件才退回按字数 `Shift+←`。
        ProseMirror（Claude 的输入框）会把 UIA 选区当成自己的选区事务，粘贴也走它自己的流程，状态和界面一致。
+     - **选区必须确认稳定**：ProseMirror（Codex 的输入框）获得焦点约 20ms 后会把它记住的光标写回页面，
+       刚 `Select()` 的选区会被冲掉，粘贴就插在光标处（内容越积越多），Delete 则什么也不删（报“没能写入”）。
+       所以选中后还要确认保持 `SelectStableMs`，被冲掉就重选，最多 `SelectAttempts` 次；始终选不中就不发按键、返回失败。
+       日志 `selection lost` 是正常重选，`selection not confirmed` 才是真的失败。
      - **读回确认**：粘贴后轮询内容，新译文出现就说明目标程序读完了剪贴板，马上恢复剪贴板、抢回前台；
        读不到内容时才固定等 `PasteSettleMs`。内容完全没变时不更新记录，返回失败，避免下次重复插入。
      - **拦截按键**：切走的这几十毫秒里，`KeyBlocker` 临时装低级键盘钩子扣下用户的真实按键，
@@ -184,6 +188,8 @@ curl -s "https://dict.youdao.com/jsonapi_s?doctype=json&jsonversion=4" --data "q
   现在 Chromium 里复制时同时用 UIA 查焦点输入框（`IsEditWithoutSelection`），确认选区为空就提前结束等待，弹出约 15ms。
   这一步只能缩短等待，不能改变结果：剪贴板一旦变了，仍以剪贴板为准。UIA 冷启动时太慢，就照常等剪贴板。
 - **等待期间用户自己复制**：靠 `InputMonitor.UserActivity` 判断，用户有操作就放弃恢复。
+- **迟到复制撞上输入翻译**：没选中文字时会打开输入翻译，之后粘贴译文也会改剪贴板，曾被 `WatchLateCopy` 当成迟到的选中文字，
+  弹窗变成查词。现在打开输入翻译时调用 `SelectionReader.CancelLateCopy` 取消这次等待。
 - **延迟渲染的大数据**：`Take` 会触发渲染，可能卡顿，上限是 `MaxBytes`。
 - **Excel**：Ctrl+C 后单元格的虚线框不会自动消失，目前未处理。
 

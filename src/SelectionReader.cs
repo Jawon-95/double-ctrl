@@ -41,6 +41,7 @@ namespace DoubleCtrl
         };
 
         private readonly InputMonitor _monitor;
+        private int _lateCopyId; // 变了就说明这次等待已被取消
 
         // 诊断用：关闭剪贴板这一层（--no-clipboard），自动化测试不会动到用户的剪贴板。
         public static bool ClipboardDisabled;
@@ -239,10 +240,11 @@ namespace DoubleCtrl
         private void WatchLateCopy(ClipboardSnapshot snapshot, uint before, DateTimeOffset copyStart)
         {
             int activity = _monitor.UserActivity;
+            int id = Interlocked.Increment(ref _lateCopyId);
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 bool changed = WaitForClipboardChange(before, LateCopyWindowMs);
-                if (!changed || _monitor.UserActivity != activity)
+                if (!changed || _monitor.UserActivity != activity || Volatile.Read(ref _lateCopyId) != id)
                 {
                     // 用户在此期间有操作时，变化可能是用户自己复制的，不能动。
                     snapshot.Discard();
@@ -253,6 +255,12 @@ namespace DoubleCtrl
                 var handler = LateSelection;
                 if (!string.IsNullOrEmpty(text) && handler != null) handler(text);
             });
+        }
+
+        // 打开输入翻译后，剪贴板接下来的变化是自己粘贴译文造成的，不能当成迟到的选中文字。
+        public void CancelLateCopy()
+        {
+            Interlocked.Increment(ref _lateCopyId);
         }
 
         private static string TakeCopiedText(ClipboardSnapshot snapshot, DateTimeOffset copyStart)

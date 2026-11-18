@@ -11,8 +11,8 @@ using Application = System.Windows.Application;
 
 [assembly: AssemblyTitle("Double Ctrl")]
 [assembly: AssemblyProduct("Double Ctrl")]
-[assembly: AssemblyVersion("1.3.0.0")]
-[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyVersion("1.3.1.0")]
+[assembly: AssemblyFileVersion("1.3.1.0")]
 
 namespace DoubleCtrl
 {
@@ -224,7 +224,11 @@ namespace DoubleCtrl
             }
             // 没选中文字但焦点在输入框里：打开输入翻译，译文写回这个输入框。
             var target = InputTarget.Detect(foreground, _monitor);
-            if (target != null) OnUi(delegate { _popup.ShowCompose(target); });
+            if (target != null)
+            {
+                _reader.CancelLateCopy();
+                OnUi(delegate { _popup.ShowCompose(target); });
+            }
             else OnUi(delegate { _popup.ShowForInput(anchor); });
         }
 
